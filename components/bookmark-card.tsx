@@ -1,8 +1,123 @@
 'use client'
 
 import React, { useRef, useEffect, useState } from 'react'
-import { ExternalLink, Download, Play, Pencil, X, Check, ImageOff } from 'lucide-react'
+import { ExternalLink, Download, Play, Pencil, X, Check, ImageOff, Bookmark, Globe } from 'lucide-react'
 import type { BookmarkWithMedia, Category } from '@/lib/types'
+
+// ── URL helpers ────────────────────────────────────────────────────────────────
+
+const URL_REGEX = /https?:\/\/[^\s]+/g
+// Twitter always shortens links to t.co — strip these from display text
+const TCO_REGEX = /https?:\/\/t\.co\/[^\s]+/g
+
+function extractUrls(text: string): string[] {
+  return text.match(URL_REGEX) ?? []
+}
+
+/** Always strip t.co shortlinks — Twitter appends them to every tweet with a link or media */
+function stripTcoUrls(text: string): string {
+  return text.replace(TCO_REGEX, '').trim()
+}
+
+// ── Link preview ───────────────────────────────────────────────────────────────
+
+interface LinkPreviewData {
+  title: string
+  description: string
+  image: string
+  siteName: string
+  domain: string
+  url: string
+}
+
+// Module-level cache: url → preview data (or null on error)
+const previewCache = new Map<string, LinkPreviewData | null>()
+
+function LinkPreview({ url, tweetUrl }: { url: string; tweetUrl: string }) {
+  const [data, setData] = useState<LinkPreviewData | null | 'loading'>('loading')
+
+  useEffect(() => {
+    if (previewCache.has(url)) {
+      setData(previewCache.get(url) ?? null)
+      return
+    }
+    let cancelled = false
+    fetch(`/api/link-preview?url=${encodeURIComponent(url)}`)
+      .then((r) => r.json())
+      .then((d: LinkPreviewData & { error?: string }) => {
+        if (cancelled) return
+        const result = d.error || !d.title ? null : d
+        previewCache.set(url, result)
+        setData(result)
+      })
+      .catch(() => {
+        if (!cancelled) { previewCache.set(url, null); setData(null) }
+      })
+    return () => { cancelled = true }
+  }, [url])
+
+  if (data === 'loading') {
+    return (
+      <div className="mt-2 rounded-xl border border-zinc-800 bg-zinc-800/40 h-16 animate-pulse" />
+    )
+  }
+
+  // Fallback: OG fetch failed or returned no title — show a minimal link chip
+  if (!data) {
+    return (
+      <a
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        onClick={(e) => e.stopPropagation()}
+        className="mt-2 inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-zinc-800 bg-zinc-800/40 hover:border-zinc-700 hover:bg-zinc-800/70 transition-all text-xs text-zinc-400 hover:text-zinc-200 max-w-full overflow-hidden"
+      >
+        <Globe size={11} className="shrink-0 text-zinc-600" />
+        <span className="truncate">{url.replace(/^https?:\/\//, '')}</span>
+        <ExternalLink size={10} className="shrink-0 text-zinc-600 ml-auto" />
+      </a>
+    )
+  }
+
+  const href = data.url || url
+
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      onClick={(e) => e.stopPropagation()}
+      className="mt-2 flex overflow-hidden rounded-xl border border-zinc-800 bg-zinc-800/40 hover:border-zinc-700 hover:bg-zinc-800/70 transition-all group/link"
+    >
+      {data.image && (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={data.image}
+          alt=""
+          className="w-24 h-full object-cover shrink-0 border-r border-zinc-800"
+          loading="lazy"
+          onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
+        />
+      )}
+      <div className="flex flex-col justify-center px-3 py-2.5 min-w-0 gap-0.5">
+        <p className="text-xs font-semibold text-zinc-200 line-clamp-1 group-hover/link:text-white transition-colors">
+          {data.title}
+        </p>
+        {data.description && (
+          <p className="text-xs text-zinc-500 line-clamp-2 leading-snug">
+            {data.description}
+          </p>
+        )}
+        <div className="flex items-center gap-1 mt-1">
+          <Globe size={10} className="text-zinc-600 shrink-0" />
+          <span className="text-[10px] text-zinc-600 truncate">
+            {data.siteName || data.domain}
+          </span>
+        </div>
+      </div>
+    </a>
+  )
+}
 
 // Module-level cache so all cards share the same fetched list
 let cachedCategories: Category[] | null = null
@@ -126,7 +241,7 @@ function MediaOverlay({ label, icon }: { label?: string; icon?: React.ReactNode 
 function MediaPlaceholder({ onClick, label }: { onClick?: (e: React.MouseEvent) => void; label: string }) {
   return (
     <div
-      className="h-40 flex items-center justify-center bg-zinc-800/70 hover:bg-zinc-800 transition-colors cursor-pointer"
+      className="h-48 flex items-center justify-center bg-zinc-800/70 hover:bg-zinc-800 transition-colors cursor-pointer"
       onClick={onClick}
     >
       <span className="px-3 py-1.5 rounded-full bg-zinc-700 text-zinc-300 text-xs font-semibold">
@@ -153,7 +268,7 @@ function TopMediaSlot({ item, tweetUrl }: TopMediaSlotProps) {
     if (imgError) {
       return (
         <a href={tweetUrl} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}>
-          <div className="h-36 flex flex-col items-center justify-center gap-2 bg-zinc-800/50 hover:bg-zinc-800/70 transition-colors">
+          <div className="h-48 flex flex-col items-center justify-center gap-2 bg-zinc-800/50 hover:bg-zinc-800/70 transition-colors">
             <ImageOff size={18} className="text-zinc-600" />
             <span className="px-3 py-1.5 rounded-full bg-zinc-700 text-zinc-400 text-xs font-semibold">
               View on X ↗
@@ -167,7 +282,7 @@ function TopMediaSlot({ item, tweetUrl }: TopMediaSlotProps) {
       <img
         src={proxyUrl(item.url)}
         alt="Bookmark media"
-        className="w-full max-h-72 object-cover"
+        className="w-full h-48 object-cover"
         loading="lazy"
         onError={() => setImgError(true)}
       />
@@ -182,7 +297,7 @@ function TopMediaSlot({ item, tweetUrl }: TopMediaSlotProps) {
         ref={videoRef}
         src={item.url}
         controls
-        className="w-full max-h-72 bg-zinc-950"
+        className="w-full h-48 object-contain bg-zinc-950"
         onError={() => { setPlaying(false); setVideoFailed(true) }}
       />
     )
@@ -199,7 +314,7 @@ function TopMediaSlot({ item, tweetUrl }: TopMediaSlotProps) {
             <img
               src={proxyUrl(thumb)}
               alt=""
-              className="w-full max-h-72 object-cover"
+              className="w-full h-48 object-cover"
               loading="lazy"
               onError={() => setImgError(true)}
             />
@@ -230,7 +345,7 @@ function TopMediaSlot({ item, tweetUrl }: TopMediaSlotProps) {
       <img
         src={proxyUrl(thumb)}
         alt=""
-        className="w-full max-h-72 object-cover"
+        className="w-full h-48 object-cover"
         loading="lazy"
         onError={() => setImgError(true)}
       />
@@ -263,9 +378,10 @@ function CategoryChip({
         border: `1px solid ${category.color}30`,
       }}
     >
-      <span
-        className="w-1.5 h-1.5 rounded-full flex-shrink-0"
-        style={{ backgroundColor: category.color }}
+      <Bookmark
+        size={9}
+        className="flex-shrink-0"
+        style={{ color: category.color, fill: category.color }}
       />
       {category.name}
       {onRemove && (
@@ -432,9 +548,15 @@ export default function BookmarkCard({ bookmark }: BookmarkCardProps) {
   const dateStr = formatDate(bookmark.tweetCreatedAt ?? bookmark.importedAt ?? null)
   const isKnownAuthor = bookmark.authorHandle !== 'unknown'
 
+  // Always strip t.co shortlinks from display text — Twitter appends them to every tweet
+  const tcoUrls = bookmark.text.match(TCO_REGEX) ?? []
+  const cleanText = stripTcoUrls(bookmark.text)
+  // Show link preview only when there's no real media attached
+  const previewUrl = !hasMedia && tcoUrls.length > 0 ? tcoUrls[tcoUrls.length - 1] : null
+
   const TEXT_LIMIT = 280
-  const isLong = bookmark.text.length > TEXT_LIMIT
-  const displayText = expanded || !isLong ? bookmark.text : bookmark.text.slice(0, TEXT_LIMIT)
+  const isLong = cleanText.length > TEXT_LIMIT
+  const displayText = expanded || !isLong ? cleanText : cleanText.slice(0, TEXT_LIMIT)
 
   const currentCategoryIds = new Set(categories.map((c) => c.id))
 
@@ -530,35 +652,41 @@ export default function BookmarkCard({ bookmark }: BookmarkCardProps) {
         </div>
 
         {/* Tweet text */}
-        {displayText.length > 0 ? (
-          <p className="text-sm text-zinc-200 leading-relaxed flex-1">
-            {displayText}
-            {isLong && !expanded && (
-              <span>
-                {'… '}
-                <button
-                  onClick={() => setExpanded(true)}
-                  className="text-indigo-400 hover:text-indigo-300 transition-colors"
-                >
-                  more
-                </button>
-              </span>
-            )}
-            {isLong && expanded && (
-              <span>
-                {' '}
-                <button
-                  onClick={() => setExpanded(false)}
-                  className="text-zinc-500 hover:text-zinc-400 transition-colors text-xs"
-                >
-                  less
-                </button>
-              </span>
-            )}
-          </p>
-        ) : !firstMedia ? (
-          <p className="text-xs text-zinc-700 italic flex-1">No text content</p>
-        ) : <div className="flex-1" />}
+        <div className={`flex-1 ${previewUrl && !displayText ? '' : 'min-h-[4.5rem]'}`}>
+          {displayText.length > 0 && (
+            <p className="text-sm text-zinc-200 leading-relaxed">
+              {displayText}
+              {isLong && !expanded && (
+                <span>
+                  {'… '}
+                  <button
+                    onClick={() => setExpanded(true)}
+                    className="text-indigo-400 hover:text-indigo-300 transition-colors"
+                  >
+                    more
+                  </button>
+                </span>
+              )}
+              {isLong && expanded && (
+                <span>
+                  {' '}
+                  <button
+                    onClick={() => setExpanded(false)}
+                    className="text-zinc-500 hover:text-zinc-400 transition-colors text-xs"
+                  >
+                    less
+                  </button>
+                </span>
+              )}
+            </p>
+          )}
+          {!displayText && !firstMedia && !previewUrl && (
+            <p className="text-xs text-zinc-700 italic">No text content</p>
+          )}
+          {previewUrl && (
+            <LinkPreview url={previewUrl} tweetUrl={tweetUrl} />
+          )}
+        </div>
 
         {/* Footer: categories + meta */}
         <div className="relative mt-auto pt-3 border-t border-zinc-800/50">

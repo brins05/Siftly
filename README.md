@@ -20,7 +20,7 @@
 
 ## What is Siftly?
 
-Siftly turns your Twitter/X bookmarks into a **searchable, categorized, visual knowledge base** — running entirely on your machine. No cloud, no subscriptions, no browser extensions required. Everything stays local except the AI API calls you control.
+Siftly turns your Twitter/X bookmarks into a **searchable, categorized, visual knowledge base** — running entirely on your machine. No cloud, no subscriptions, no browser extensions required. Everything stays local except the AI API calls you configure.
 
 It runs a **4-stage AI pipeline** on your bookmarks:
 
@@ -31,7 +31,7 @@ It runs a **4-stage AI pipeline** on your bookmarks:
     ↓
 👁️  Vision Analysis      — reads text, objects, and context from every image/GIF/video thumbnail
     ↓
-🧠 Semantic Tagging     — generates 30–50 searchable tags per bookmark for AI-powered search
+🧠 Semantic Tagging     — generates 25–35 searchable tags per bookmark for AI-powered search
     ↓
 📂 Categorization       — assigns each bookmark to 1–3 categories with confidence scores
 ```
@@ -42,19 +42,17 @@ After the pipeline runs, you get:
 - **Filtered browsing** — grid or list view, filter by category, media type, and date
 - **Export tools** — download media, export as CSV / JSON / ZIP
 
-**100% free — powered by your existing X OAuth subscription. No API keys required.**
-
 ---
 
 ## Quick Start
 
-> **If you're using Claude Code, Claude CLI, or openclaw:** run these commands one by one. Each step is self-contained.
+> **Using Claude Code or Claude CLI?** Run `claude setup-token` in your terminal to get your API key, then paste it into Siftly Settings.
 
 ### Prerequisites
 
 - Node.js 18+
 - npm
-- An [Anthropic API key](https://console.anthropic.com) *(optional — AI features work via X OAuth for free; a key unlocks additional model options)*
+- An [Anthropic API key](https://console.anthropic.com) — required for AI features
 
 ### 1. Clone & Install
 
@@ -85,13 +83,14 @@ Edit `.env.local`:
 DATABASE_URL="file:./prisma/dev.db"
 
 # Required for AI features — get yours at console.anthropic.com
+# Claude CLI users: run `claude setup-token` in your terminal to get this
 ANTHROPIC_API_KEY=sk-ant-...
 
-# Optional: custom API endpoint (for proxies, openclaw routing, or local models)
+# Optional: custom API endpoint (proxies, local models)
 # ANTHROPIC_BASE_URL=http://localhost:8080
 ```
 
-> **Tip:** You can also enter your API key directly in the Siftly **Settings** page after launch — no restart required.
+> **Tip:** You can also enter your API key directly in the Siftly **Settings** page after launch — no restart required. The Settings page shows a copyable `claude setup-token` command for Claude CLI users.
 
 ### 4. Run
 
@@ -112,7 +111,7 @@ Siftly has **built-in import tools** — no browser extensions required. Go to t
 1. Go to **Import** in the Siftly sidebar
 2. Drag the **"Export X Bookmarks"** link to your browser's bookmark bar
    *(or copy the URL manually: right-click bookmark bar → Add Bookmark → paste the URL)*
-3. Go to [x.com/bookmarks](https://x.com/bookmarks) while logged in to X
+3. Go to [x.com/i/bookmarks](https://x.com/i/bookmarks) while logged in to X
 4. Click **"Export X Bookmarks"** in your bookmark bar — a purple button appears on the page
 5. Click **"▶ Auto-scroll"** — the tool scrolls through and captures all your bookmarks automatically
 6. When complete, click the purple **"Export N bookmarks"** button — `bookmarks.json` downloads
@@ -120,7 +119,7 @@ Siftly has **built-in import tools** — no browser extensions required. Go to t
 
 ### Method B — Browser Console Script
 
-1. Go to [x.com/bookmarks](https://x.com/bookmarks) while logged in to X
+1. Go to [x.com/i/bookmarks](https://x.com/i/bookmarks) while logged in to X
 2. Open DevTools: press `F12` (Windows/Linux) or `⌘⌥J` (Mac), then go to the **Console** tab
 3. Copy the console script from the Siftly Import page, paste it into the console, and press Enter
 4. Click **"▶ Auto-scroll"** and wait for all bookmarks to be captured
@@ -135,10 +134,10 @@ Re-import anytime — Siftly automatically skips duplicates and only adds new bo
 
 ## AI Categorization
 
-After importing, Siftly **automatically starts AI categorization**. You can also trigger it manually from:
+**Categorization starts automatically as soon as you import.** You can also trigger it manually from:
 
-- The **Import** page (shown immediately after upload)
-- The **Mindmap** page (shown when bookmarks are uncategorized)
+- The **Import** page (after upload)
+- The **Mindmap** page (when bookmarks are uncategorized)
 - The **Categorize** page in the sidebar
 
 ### The 4-Stage Pipeline
@@ -147,7 +146,7 @@ After importing, Siftly **automatically starts AI categorization**. You can also
 |-------|-------------|
 | **Entity Extraction** | Mines hashtags, URLs, @mentions, and 80+ known tool/product names from stored tweet JSON |
 | **Vision Analysis** | Analyzes every image, GIF, and video thumbnail — OCR text, objects, scene, mood, meme templates, 30–40 visual tags |
-| **Semantic Tagging** | Generates 30–50 precise search tags per bookmark by combining tweet text + image context |
+| **Semantic Tagging** | Generates 25–35 precise search tags per bookmark by combining tweet text + image context. Also extracts sentiment, people, and company names. |
 | **Categorization** | Assigns 1–3 categories per bookmark with confidence scores using all enriched data |
 
 The pipeline is **incremental** — if interrupted, it picks up where it left off. Use **"Re-run everything (force all)"** to re-analyze bookmarks that were already processed.
@@ -165,7 +164,7 @@ Natural language queries across all bookmark data:
 - *"bitcoin price chart"*
 - *"best AI coding tools"*
 
-Searches tweet text, image OCR, visual tags, semantic tags, and categories simultaneously. Results are ranked by relevance with AI-generated explanations for each match.
+Searches tweet text, image OCR, visual tags, semantic tags, and categories simultaneously using a full-text search index (FTS5) + Claude semantic reranking. Results are ranked by relevance with AI-generated explanations for each match.
 
 ### 🗺️ Mindmap
 
@@ -174,7 +173,7 @@ Interactive force-directed graph showing all bookmarks organized by category:
 - Expand/collapse any category to reveal its bookmarks
 - Click a bookmark node to open the original tweet on X
 - Color-coded legend by category
-- Automatically shows an **AI Categorize** prompt when bookmarks haven't been processed yet
+- If bookmarks aren't categorized yet, an inline **AI Categorize** button starts the pipeline without leaving the page
 
 ### 📚 Browse & Filter
 
@@ -220,11 +219,22 @@ All settings are manageable in the **Settings** page at `/settings` or via envir
 
 | Setting | Env Var | Description |
 |---------|---------|-------------|
-| Anthropic API Key | `ANTHROPIC_API_KEY` | Required for AI features |
-| API Base URL | `ANTHROPIC_BASE_URL` | Custom endpoint — proxies, openclaw, local models |
-| AI Model | Settings page | Haiku 4.5 (default, cheapest), Sonnet 4.6, Opus 4.6 |
+| Anthropic API Key | `ANTHROPIC_API_KEY` | Required for AI features. Claude CLI users: run `claude setup-token` |
+| API Base URL | `ANTHROPIC_BASE_URL` | Custom endpoint for API proxies or local models |
+| AI Model | Settings page | Haiku 4.5 (default), Sonnet 4.6, Opus 4.6 |
 | OpenAI Key | Settings page | Alternative provider if no Anthropic key is set |
 | Database | `DATABASE_URL` | SQLite file path |
+
+### Getting Your API Key
+
+**Option 1 — Claude CLI (fastest):**
+```bash
+claude setup-token
+```
+Copy the printed token and paste it into Siftly Settings.
+
+**Option 2 — Anthropic Console:**
+Go to [console.anthropic.com](https://console.anthropic.com), create an API key, and paste it into Settings.
 
 ### Custom API Endpoint
 
@@ -233,8 +243,6 @@ Point Siftly at any Anthropic-compatible server:
 ```env
 ANTHROPIC_BASE_URL=http://localhost:8080
 ```
-
-Useful for openclaw routing, API proxies, rate-limit management, or self-hosted inference.
 
 ---
 
@@ -248,22 +256,23 @@ siftly/
 │   │   ├── categorize/       # 4-stage AI pipeline (start, status, stop)
 │   │   ├── categories/       # Category CRUD
 │   │   ├── export/           # CSV, JSON, ZIP export
-│   │   ├── import/           # JSON file import with deduplication
+│   │   ├── import/           # JSON file import with dedup + auto-pipeline trigger
+│   │   ├── link-preview/     # Server-side OG metadata scraper
 │   │   ├── mindmap/          # Graph nodes + edges for visualization
-│   │   ├── search/ai/        # Natural language semantic search
-│   │   ├── settings/         # API key + model config
+│   │   ├── search/ai/        # Natural language semantic search (FTS5 + Claude)
+│   │   ├── settings/         # API key + model config + key test endpoint
 │   │   └── stats/            # Dashboard stats
 │   ├── ai-search/            # AI search page
 │   ├── bookmarks/            # Browse, filter, paginate
 │   ├── categorize/           # Pipeline monitor with live progress
 │   ├── categories/           # Category management
-│   ├── import/               # 3-step import flow (instructions → upload → categorize)
+│   ├── import/               # 3-step import flow (instructions → upload → auto-categorize)
 │   ├── mindmap/              # Interactive graph
 │   ├── settings/             # Configuration
 │   └── page.tsx              # Dashboard
 │
 ├── components/
-│   ├── bookmark-card.tsx     # Card with media, categories, hover actions
+│   ├── bookmark-card.tsx     # Card with media, link previews, categories, hover actions
 │   ├── category-card.tsx     # Category display card
 │   ├── command-palette.tsx   # Cmd+K global search
 │   ├── nav.tsx               # Sidebar navigation
@@ -271,7 +280,9 @@ siftly/
 │
 ├── lib/
 │   ├── categorizer.ts        # AI categorization logic + default categories
-│   ├── vision-analyzer.ts    # Image analysis + semantic tagging
+│   ├── vision-analyzer.ts    # Image analysis + batch semantic tagging
+│   ├── image-context.ts      # Shared image context builder
+│   ├── fts.ts                # SQLite FTS5 full-text search index
 │   ├── rawjson-extractor.ts  # Entity extraction from raw tweet JSON
 │   ├── parser.ts             # Multi-format JSON parser
 │   ├── exporter.ts           # CSV, JSON, ZIP export
@@ -284,7 +295,7 @@ siftly/
 ### Database Schema
 
 ```
-Bookmark          — tweet text, author, date, raw JSON, semantic tags, enrichment timestamp
+Bookmark          — tweet text, author, date, raw JSON, semantic tags, enrichment metadata
   ├── MediaItem   — images / videos / GIFs with AI-generated image tags
   └── BookmarkCategory — category assignments with confidence scores (0–1)
 
@@ -302,7 +313,7 @@ ImportJob         — tracks import file status and progress
 | [Next.js 15](https://nextjs.org) | Full-stack framework (App Router) |
 | [TypeScript 5](https://www.typescriptlang.org) | Type safety throughout |
 | [Prisma 7](https://www.prisma.io) | ORM + migrations |
-| [SQLite](https://sqlite.org) | Local database — zero setup |
+| [SQLite](https://sqlite.org) | Local database — zero setup, includes FTS5 |
 | [Tailwind CSS v4](https://tailwindcss.com) | Styling |
 | [Anthropic SDK](https://anthropic.com) | Vision, semantic tagging, categorization, search |
 | [React Flow](https://reactflow.dev) | Interactive mindmap graph |

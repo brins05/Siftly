@@ -112,6 +112,17 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     },
   })
 
+  // Auto-start the AI pipeline immediately after import (fire-and-forget).
+  // The categorize route is idempotent — it ignores the call if already running.
+  if (importedCount > 0) {
+    const categorizeUrl = new URL('/api/categorize', request.url)
+    void fetch(categorizeUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }).catch(() => { /* pipeline start is best-effort */ })
+  }
+
   return NextResponse.json({
     jobId: importJob.id,
     count: importedCount,

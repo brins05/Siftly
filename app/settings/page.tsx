@@ -17,6 +17,9 @@ import {
   Zap,
   Copy,
   Coffee,
+  Terminal,
+  Loader2,
+  X,
 } from 'lucide-react'
 
 const ANTHROPIC_MODELS = [
@@ -96,6 +99,7 @@ function ApiKeyField({
   hint,
   docHref,
   onToast,
+  testProvider,
 }: {
   label: string
   placeholder: string
@@ -103,11 +107,14 @@ function ApiKeyField({
   hint: string
   docHref: string
   onToast: (t: Toast) => void
+  testProvider?: string
 }) {
   const [key, setKey] = useState('')
   const [showKey, setShowKey] = useState(false)
   const [saving, setSaving] = useState(false)
   const [savedMasked, setSavedMasked] = useState<string | null>(null)
+  const [testState, setTestState] = useState<'idle' | 'testing' | 'ok' | 'fail'>('idle')
+  const [testError, setTestError] = useState('')
 
   // Load existing saved key status on mount
   useEffect(() => {
@@ -127,6 +134,7 @@ function ApiKeyField({
       return
     }
     setSaving(true)
+    setTestState('idle')
     try {
       const res = await fetch('/api/settings', {
         method: 'POST',
@@ -137,9 +145,11 @@ function ApiKeyField({
         const data = await res.json() as { error?: string }
         throw new Error(data.error ?? 'Failed to save')
       }
-      onToast({ type: 'success', message: `${label} saved successfully` })
       setSavedMasked(key.trim().slice(0, 6) + '••••••••' + key.trim().slice(-4))
       setKey('')
+      // Auto-test after save
+      if (testProvider) void handleTest()
+      else onToast({ type: 'success', message: `${label} saved successfully` })
     } catch (err) {
       onToast({
         type: 'error',
@@ -150,15 +160,64 @@ function ApiKeyField({
     }
   }
 
+  async function handleTest() {
+    if (!testProvider) return
+    setTestState('testing')
+    setTestError('')
+    try {
+      const res = await fetch('/api/settings/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: testProvider }),
+      })
+      const data = await res.json() as { working: boolean; error?: string }
+      if (data.working) {
+        setTestState('ok')
+        onToast({ type: 'success', message: `${label} is working` })
+      } else {
+        setTestState('fail')
+        setTestError(data.error ?? 'Key test failed')
+      }
+    } catch {
+      setTestState('fail')
+      setTestError('Connection error')
+    }
+  }
+
   return (
     <div className="space-y-2.5">
       <div className="flex items-center justify-between gap-2 min-w-0">
         <p className="text-sm font-medium text-zinc-300 shrink-0">{label}</p>
-        {savedMasked && (
-          <span className="flex items-center gap-1.5 text-xs text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-lg min-w-0 overflow-hidden">
-            <Check size={11} className="shrink-0" /> <span className="shrink-0">Saved:</span> <span className="font-mono truncate">{savedMasked}</span>
-          </span>
-        )}
+        <div className="flex items-center gap-2 min-w-0 overflow-hidden">
+          {savedMasked && (
+            <span className="flex items-center gap-1.5 text-xs text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-lg min-w-0 overflow-hidden">
+              <Check size={11} className="shrink-0" /> <span className="shrink-0">Saved:</span> <span className="font-mono truncate">{savedMasked}</span>
+            </span>
+          )}
+          {testProvider && savedMasked && testState === 'idle' && (
+            <button
+              onClick={() => void handleTest()}
+              className="shrink-0 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+            >
+              Test
+            </button>
+          )}
+          {testState === 'testing' && (
+            <span className="flex items-center gap-1 text-xs text-zinc-400 shrink-0">
+              <Loader2 size={11} className="animate-spin" /> Testing…
+            </span>
+          )}
+          {testState === 'ok' && (
+            <span className="flex items-center gap-1 text-xs text-emerald-400 shrink-0">
+              <Check size={11} /> Working
+            </span>
+          )}
+          {testState === 'fail' && (
+            <span className="flex items-center gap-1 text-xs text-red-400 shrink-0" title={testError}>
+              <X size={11} /> {testError.slice(0, 30) || 'Failed'}
+            </span>
+          )}
+        </div>
       </div>
       <div className="flex gap-2.5">
         <div className="relative flex-1">
@@ -270,6 +329,41 @@ function ModelSelector({
   )
 }
 
+function ClaudeSetupBox() {
+  const [copied, setCopied] = useState(false)
+  const CMD = 'claude setup-token'
+
+  function copy() {
+    void navigator.clipboard.writeText(CMD).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
+
+  return (
+    <div className="flex gap-3 p-3.5 rounded-xl bg-zinc-800/60 border border-zinc-700 mb-5">
+      <Terminal size={15} className="text-zinc-400 shrink-0 mt-0.5" />
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium text-zinc-200">Get your API key from the terminal</p>
+        <p className="text-xs text-zinc-500 mt-0.5 leading-relaxed">
+          Using Claude CLI? Run this command — it prints your auth token directly.
+        </p>
+        <button
+          onClick={copy}
+          className="mt-2 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-900 border border-zinc-700 hover:border-zinc-500 transition-colors group w-full max-w-xs"
+        >
+          <span className="font-mono text-xs text-indigo-300 flex-1 text-left">{CMD}</span>
+          {copied
+            ? <Check size={13} className="text-emerald-400 shrink-0" />
+            : <Copy size={13} className="text-zinc-600 group-hover:text-zinc-300 transition-colors shrink-0" />
+          }
+        </button>
+        {copied && <p className="text-[10px] text-emerald-400 mt-1">Copied!</p>}
+      </div>
+    </div>
+  )
+}
+
 function ApiKeySection({ onToast }: { onToast: (t: Toast) => void }) {
   return (
     <Section
@@ -277,24 +371,8 @@ function ApiKeySection({ onToast }: { onToast: (t: Toast) => void }) {
       title="AI Provider"
       description="Configure your AI API key. Claude is used for categorization and semantic search. OpenAI works as an alternative."
     >
-      {/* OAuth info box */}
-      <div className="flex gap-3 p-3.5 rounded-xl bg-indigo-500/8 border border-indigo-500/20 mb-5">
-        <Zap size={15} className="text-indigo-400 shrink-0 mt-0.5" />
-        <div className="min-w-0">
-          <p className="text-sm font-medium text-indigo-300">Use X OAuth for free — no paid API key needed</p>
-          <p className="text-xs text-zinc-500 mt-0.5 leading-relaxed">
-            Authenticate with your X account directly to use AI features without any API costs.
-          </p>
-          <a
-            href="https://x.com/viperr/status/2023977225087832266?s=20"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 text-xs text-indigo-400 hover:text-indigo-300 transition-colors mt-1.5"
-          >
-            Learn how it works <ExternalLink size={11} />
-          </a>
-        </div>
-      </div>
+      {/* Claude CLI setup tip */}
+      <ClaudeSetupBox />
 
       <div className="space-y-5">
         <div>
@@ -305,6 +383,7 @@ function ApiKeySection({ onToast }: { onToast: (t: Toast) => void }) {
             hint="Used for AI categorization and search."
             docHref="https://console.anthropic.com"
             onToast={onToast}
+            testProvider="anthropic"
           />
           <ModelSelector
             models={ANTHROPIC_MODELS}

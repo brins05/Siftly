@@ -1,13 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import prisma from '@/lib/db'
+import { ftsSearch } from '@/lib/fts'
 
-// ─── In-memory result cache (per query+category, 5-minute TTL) ──────────────
-interface CacheEntry {
-  results: unknown
-  expiresAt: number
-}
-
+// ─── Cache ────────────────────────────────────────────────────────────────────
+interface CacheEntry { results: unknown; expiresAt: number }
 const searchCache = new Map<string, CacheEntry>()
 const CACHE_TTL_MS = 5 * 60 * 1000
 
@@ -17,76 +14,199 @@ function getCached(key: string): unknown | null {
   if (Date.now() > entry.expiresAt) { searchCache.delete(key); return null }
   return entry.results
 }
-
 function setCache(key: string, results: unknown): void {
-  // Cap cache size at 50 entries
-  if (searchCache.size >= 50) searchCache.delete(searchCache.keys().next().value!)
+  if (searchCache.size >= 100) searchCache.delete(searchCache.keys().next().value!)
   searchCache.set(key, { results, expiresAt: Date.now() + CACHE_TTL_MS })
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// ─── Module-level caches (avoid DB roundtrips on every search) ────────────────
+let _apiKey: string | null = null
+let _apiKeyExpiry = 0
+let _model: string | null = null
+let _modelExpiry = 0
+let _categoriesCache: { slug: string; name: string; description: string | null }[] | null = null
+let _categoriesCacheExpiry = 0
 
 async function getApiKey(): Promise<string> {
+  if (_apiKey !== null && Date.now() < _apiKeyExpiry) return _apiKey
   const setting = await prisma.setting.findUnique({ where: { key: 'anthropicApiKey' } })
-  if (setting?.value?.trim()) return setting.value.trim()
-  return process.env.ANTHROPIC_API_KEY ?? ''
+  _apiKey = setting?.value?.trim() || process.env.ANTHROPIC_API_KEY || ''
+  _apiKeyExpiry = Date.now() + 60 * 1000 // 1-minute TTL (key changes are rare)
+  return _apiKey
 }
-
 async function getAnthropicModel(): Promise<string> {
+  if (_model && Date.now() < _modelExpiry) return _model
   const setting = await prisma.setting.findUnique({ where: { key: 'anthropicModel' } })
-  return setting?.value ?? 'claude-haiku-4-5-20251001'
+  _model = setting?.value ?? 'claude-haiku-4-5-20251001'
+  _modelExpiry = Date.now() + 5 * 60 * 1000
+  return _model
+}
+async function getAllCategories() {
+  if (_categoriesCache && Date.now() < _categoriesCacheExpiry) return _categoriesCache
+  _categoriesCache = await prisma.category.findMany({ select: { slug: true, name: true, description: true } })
+  _categoriesCacheExpiry = Date.now() + 2 * 60 * 1000
+  return _categoriesCache
 }
 
-/** Extract meaningful keywords from a query for pre-filtering */
+/** Extract meaningful keywords — keeps short important terms like "KYC", "AI" */
 function extractKeywords(query: string): string[] {
   const stopWords = new Set([
     'a', 'an', 'the', 'and', 'or', 'for', 'in', 'on', 'at', 'to', 'of',
     'is', 'it', 'about', 'that', 'with', 'by', 'this', 'my', 'me', 'i',
-    'something', 'anything', 'some', 'any', 'show', 'find', 'get',
+    'something', 'anything', 'some', 'any', 'show', 'find', 'get', 'use',
+    'regarding', 'context', 'would', 'could', 'should', 'want', 'need',
+    'looking', 'related', 'using', 'used', 'based',
   ])
   return query
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
     .split(/\s+/)
-    .filter((w) => w.length > 2 && !stopWords.has(w))
-    .slice(0, 8)
+    // Allow short words (2+ chars) so "AI", "ML", "KYC" survive
+    .filter((w) => w.length >= 2 && !stopWords.has(w))
+    .slice(0, 10)
 }
 
 /**
- * Parse structured imageTags JSON (new format) or fall back to plaintext (legacy).
- * Returns a compact string suitable for inclusion in the search index.
+ * Map query intent signals to category slugs using cached category list.
  */
-function buildImageContext(imageTags: string | null): string {
-  if (!imageTags || imageTags === '{}') return ''
-  try {
-    const parsed = JSON.parse(imageTags) as Record<string, unknown>
-    const parts: string[] = []
-    if (parsed.scene) parts.push(`scene:${parsed.scene}`)
-    if (parsed.action) parts.push(`action:${parsed.action}`)
-    if (parsed.style) parts.push(`style:${parsed.style}`)
-    if (parsed.mood) parts.push(`mood:${parsed.mood}`)
-    if (Array.isArray(parsed.text_ocr) && (parsed.text_ocr as unknown[]).length)
-      parts.push(`text:"${(parsed.text_ocr as string[]).join(' | ').slice(0, 200)}"`)
-    if (Array.isArray(parsed.people) && (parsed.people as unknown[]).length)
-      parts.push(`people:${(parsed.people as string[]).join(', ')}`)
-    if (Array.isArray(parsed.objects) && (parsed.objects as unknown[]).length)
-      parts.push(`objects:${(parsed.objects as string[]).slice(0, 6).join(', ')}`)
-    if (parsed.meme_template) parts.push(`meme:${parsed.meme_template}`)
-    if (Array.isArray(parsed.tags) && (parsed.tags as unknown[]).length)
-      parts.push(`tags:${(parsed.tags as string[]).slice(0, 20).join(', ')}`)
-    return parts.join(' | ')
-  } catch {
-    return imageTags.slice(0, 400)
+async function detectIntentCategories(query: string): Promise<string[]> {
+  const q = query.toLowerCase()
+  const slugs = new Set<string>()
+
+  const allCats = await getAllCategories()
+
+  const INTENT_SIGNALS: Array<{ pattern: RegExp; slugHints: string[] }> = [
+    {
+      pattern: /meme|funny|humor|laugh|lol|joke|hilarious|comedy|satire|roast|viral|dank|wholesome|cringe|based|skit|parody/i,
+      slugHints: ['funny-memes'],
+    },
+    {
+      pattern: /crypto|bitcoin|btc|eth|sol|defi|nft|trading|chart|invest|token|wallet|blockchain|altcoin|memecoin|pump|dump|yield|staking|airdrop|web3|dex|liquidity|portfolio|stocks|options|macro|economy|dollar|inflation|fed|interest rate/i,
+      slugHints: ['finance-crypto'],
+    },
+    {
+      pattern: /code|coding|developer|programming|github|software|api|framework|library|debug|deploy|devops|backend|frontend|fullstack|typescript|javascript|python|rust|golang|java|swift|css|html|sql|cli|terminal|bash|docker|kubernetes|ci.?cd|open.?source|repo|pull request|lint/i,
+      slugHints: ['dev-tools'],
+    },
+    {
+      pattern: /\bai\b|llm|gpt|claude|openai|anthropic|gemini|mistral|llama|model|prompt|agent|machine learning|neural|deep learning|embedding|rag|fine.?tun|inference|transformer|diffusion|multimodal|copilot|cursor|midjourney|stable diffusion|image gen/i,
+      slugHints: ['ai-resources'],
+    },
+    {
+      pattern: /design|ui\b|ux\b|figma|typography|branding|logo|visual|color palette|layout|wireframe|prototype|tailwind|animation|motion|font|icon|component|design system|saas ui/i,
+      slugHints: ['design'],
+    },
+    {
+      pattern: /productivity|focus|habit|workflow|time management|system|note.?taking|task|pkm|second brain|obsidian|notion|roam|logseq|journaling|calendar|routine|morning|discipline|deep work|async/i,
+      slugHints: ['productivity'],
+    },
+    {
+      pattern: /news|breaking|announcement|launch|update|thread|essay|opinion|analysis|report|geopolitic|politic|regulation|lawsuit|acquisition|ipo|funding|raised|series/i,
+      slugHints: ['news'],
+    },
+  ]
+
+  for (const { pattern, slugHints } of INTENT_SIGNALS) {
+    if (pattern.test(q)) {
+      for (const hint of slugHints) {
+        for (const cat of allCats) {
+          if (
+            cat.slug === hint ||
+            cat.slug.includes(hint.split('-')[0]) ||
+            cat.name.toLowerCase().includes(hint.replace(/-/g, ' ')) ||
+            (cat.description && cat.description.toLowerCase().includes(hint.split('-')[0]))
+          ) {
+            slugs.add(cat.slug)
+          }
+        }
+      }
+    }
   }
+
+  return Array.from(slugs)
 }
 
-// ─── Main handler ────────────────────────────────────────────────────────────
+/** Build a rich, readable index entry for a bookmark */
+function buildIndexEntry(b: {
+  id: string
+  tweetId: string
+  text: string
+  authorHandle: string
+  authorName: string
+  semanticTags: string | null
+  entities: string | null
+  mediaItems: { type: string; imageTags: string | null }[]
+  categories: { confidence: number; category: { slug: string; name: string } }[]
+}): string {
+  const lines: string[] = [`[${b.id}]`]
 
+  // Text — more generous limit for complex queries
+  lines.push(`text: ${b.text.slice(0, 350)}`)
+
+  // Image/media context — rich structured data
+  for (const m of b.mediaItems) {
+    if (!m.imageTags || m.imageTags === '{}') {
+      lines.push(`media: [${m.type}]`)
+      continue
+    }
+    try {
+      const p = JSON.parse(m.imageTags) as Record<string, unknown>
+      const parts: string[] = [`type=${m.type}`]
+      if (p.style) parts.push(`style=${p.style}`)
+      if (p.scene) parts.push(`scene=${p.scene}`)
+      if (p.action) parts.push(`action=${p.action}`)
+      if (p.mood) parts.push(`mood=${p.mood}`)
+      if (p.meme_template) parts.push(`meme=${p.meme_template}`)
+      if (Array.isArray(p.text_ocr) && (p.text_ocr as string[]).length)
+        parts.push(`ocr="${(p.text_ocr as string[]).join(' | ').slice(0, 250)}"`)
+      if (Array.isArray(p.people) && (p.people as string[]).length)
+        parts.push(`people=${(p.people as string[]).join(', ')}`)
+      if (Array.isArray(p.objects) && (p.objects as string[]).length)
+        parts.push(`objects=${(p.objects as string[]).slice(0, 8).join(', ')}`)
+      if (Array.isArray(p.tags) && (p.tags as string[]).length)
+        parts.push(`vtags=${(p.tags as string[]).slice(0, 25).join(', ')}`)
+      lines.push(`media: ${parts.join(' | ')}`)
+    } catch {
+      lines.push(`media: [${m.type}] ${m.imageTags.slice(0, 200)}`)
+    }
+  }
+
+  // AI semantic tags — full set
+  if (b.semanticTags && b.semanticTags !== '[]') {
+    try {
+      const tags = JSON.parse(b.semanticTags) as string[]
+      if (tags.length) lines.push(`ai_tags: ${tags.slice(0, 35).join(', ')}`)
+    } catch { /* ignore */ }
+  }
+
+  // Hashtags + tool mentions
+  if (b.entities) {
+    try {
+      const ent = JSON.parse(b.entities) as { hashtags?: string[]; tools?: string[]; mentions?: string[] }
+      const parts: string[] = []
+      if (ent.hashtags?.length) parts.push(`#${ent.hashtags.slice(0, 10).join(' #')}`)
+      if (ent.tools?.length) parts.push(`tools: ${ent.tools.join(', ')}`)
+      if (ent.mentions?.length) parts.push(`mentions: @${ent.mentions.slice(0, 5).join(' @')}`)
+      if (parts.length) lines.push(parts.join(' | '))
+    } catch { /* ignore */ }
+  }
+
+  // Categories with confidence
+  if (b.categories.length) {
+    const cats = b.categories
+      .filter((c) => c.confidence >= 0.5)
+      .map((c) => `${c.category.name}(${c.confidence.toFixed(1)})`)
+      .join(', ')
+    if (cats) lines.push(`categories: ${cats}`)
+  }
+
+  return lines.join('\n')
+}
+
+// ─── Main handler ─────────────────────────────────────────────────────────────
 export async function POST(request: NextRequest): Promise<NextResponse> {
   let body: { query?: string; category?: string } = {}
-  try {
-    body = await request.json()
-  } catch {
+  try { body = await request.json() } catch {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
   }
 
@@ -98,12 +218,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'No Anthropic API key configured. Add it in Settings.' }, { status: 400 })
   }
 
-  // Check cache first — same query+category = instant response
   const cacheKey = `${query.trim().toLowerCase()}::${category ?? ''}`
   const cached = getCached(cacheKey)
-  if (cached) {
-    return NextResponse.json(cached)
-  }
+  if (cached) return NextResponse.json(cached)
 
   const baseURL = process.env.ANTHROPIC_BASE_URL
   const client = new Anthropic({ apiKey, ...(baseURL ? { baseURL } : {}) })
@@ -113,131 +230,145 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     ? { categories: { some: { category: { slug: category } } } }
     : {}
 
-  // ── Step 1: Keyword pre-filter ────────────────────────────────────────────
-  // Use SQLite LIKE to narrow candidates before sending to Claude.
-  // This reduces prompt size by 60-90% for most queries.
+  // ── Step 1: Smart candidate selection ─────────────────────────────────────
   const keywords = extractKeywords(query)
-  const MAX_CANDIDATES = 350
+  const intentSlugs = category ? [] : await detectIntentCategories(query)
+  const MAX_CANDIDATES = 150 // smaller, richer set beats larger, noisier set
 
-  type BookmarkInclude = Awaited<ReturnType<typeof loadBookmarks>>
-  async function loadBookmarks(whereExtra: object = {}) {
-    return prisma.bookmark.findMany({
-      where: { ...categoryFilter, ...whereExtra },
-      // Enriched bookmarks first — they have semantic tags = better search
-      orderBy: [{ enrichedAt: 'desc' }, { tweetCreatedAt: 'desc' }],
-      take: MAX_CANDIDATES,
-      select: {
-        id: true,
-        tweetId: true,
-        text: true,
-        authorHandle: true,
-        authorName: true,
-        tweetCreatedAt: true,
-        importedAt: true,
-        semanticTags: true,
-        entities: true,
-        mediaItems: { select: { id: true, type: true, url: true, thumbnailUrl: true, imageTags: true } },
-        categories: {
-          include: { category: { select: { id: true, name: true, slug: true, color: true } } },
-          orderBy: { confidence: 'desc' },
-        },
-      },
-    })
+  const selectShape = {
+    id: true, tweetId: true, text: true, authorHandle: true, authorName: true,
+    tweetCreatedAt: true, importedAt: true, semanticTags: true, entities: true,
+    mediaItems: { select: { id: true, type: true, url: true, thumbnailUrl: true, imageTags: true } },
+    categories: {
+      include: { category: { select: { id: true, name: true, slug: true, color: true } } },
+      orderBy: { confidence: 'desc' as const },
+    },
+  } as const
+
+  // Try FTS5 first (fast, ranked by relevance); fall back to LIKE on error/empty
+  const ftsIds = keywords.length > 0 ? await ftsSearch(keywords) : []
+  const useFts = ftsIds.length > 0
+
+  // Build LIKE-based fallback conditions (used when FTS5 is empty/unavailable)
+  const keywordConditions = keywords.flatMap((kw) => [
+    { text: { contains: kw } },
+    { semanticTags: { contains: kw } },
+    { entities: { contains: kw } },
+    { mediaItems: { some: { imageTags: { contains: kw } } } },
+  ])
+
+  // Run keyword-filtered and category-intent queries in parallel
+  const [keywordHits, intentHits] = await Promise.all([
+    keywords.length > 0
+      ? prisma.bookmark.findMany({
+          where: {
+            ...categoryFilter,
+            ...(useFts
+              ? { id: { in: ftsIds } }
+              : { OR: keywordConditions }),
+          },
+          // FTS results are pre-ranked; LIKE results fall back to recency ordering
+          orderBy: useFts ? undefined : [{ enrichedAt: 'desc' }, { tweetCreatedAt: 'desc' }],
+          take: MAX_CANDIDATES,
+          select: selectShape,
+        })
+      : prisma.bookmark.findMany({ where: { id: 'never' }, select: selectShape }),
+
+    intentSlugs.length > 0
+      ? prisma.bookmark.findMany({
+          where: {
+            ...categoryFilter,
+            categories: { some: { category: { slug: { in: intentSlugs } } } },
+          },
+          orderBy: [{ enrichedAt: 'desc' }, { tweetCreatedAt: 'desc' }],
+          take: 80,
+          select: selectShape,
+        })
+      : prisma.bookmark.findMany({ where: { id: 'never' }, select: selectShape }),
+  ])
+
+  // Merge: keyword hits first (more specific), then intent hits, dedup by id
+  const seen = new Set<string>()
+  const merged: typeof keywordHits = []
+  for (const b of [...keywordHits, ...intentHits]) {
+    if (!seen.has(b.id)) { seen.add(b.id); merged.push(b) }
   }
 
-  // Build a LIKE filter across text + semanticTags (compound OR per keyword)
-  let bookmarks: BookmarkInclude
-  if (keywords.length > 0) {
-    const keywordConditions = keywords.flatMap((kw) => [
-      { text: { contains: kw } },
-      { semanticTags: { contains: kw } },
-      { entities: { contains: kw } },
-    ])
-    const filtered = await loadBookmarks({ OR: keywordConditions })
-
-    // If keyword filter is too aggressive (< 15 results), fall back to all bookmarks
-    bookmarks = filtered.length >= 15 ? filtered : await loadBookmarks()
-  } else {
-    bookmarks = await loadBookmarks()
+  // If still very few candidates, pull a recent sample so Claude has something to work with
+  let bookmarks = merged
+  if (bookmarks.length < 20) {
+    const fallback = await prisma.bookmark.findMany({
+      where: categoryFilter,
+      orderBy: [{ enrichedAt: 'desc' }, { tweetCreatedAt: 'desc' }],
+      take: MAX_CANDIDATES,
+      select: selectShape,
+    })
+    const fallbackSeen = new Set(bookmarks.map((b) => b.id))
+    for (const b of fallback) {
+      if (!fallbackSeen.has(b.id)) { fallbackSeen.add(b.id); bookmarks.push(b) }
+    }
+    // Cap total
+    bookmarks = bookmarks.slice(0, MAX_CANDIDATES)
   }
 
   if (bookmarks.length === 0) {
     return NextResponse.json({ bookmarks: [], explanation: 'No bookmarks found.' })
   }
 
-  // ── Step 2: Build compact search index ────────────────────────────────────
-  const index = bookmarks.map((b) => {
-    const mediaContext = b.mediaItems
-      .map((m) => {
-        const ctx = buildImageContext(m.imageTags)
-        return ctx ? `[${m.type}:${ctx}]` : `[${m.type}]`
-      })
-      .join(' ')
+  // ── Step 2: Build rich search index ───────────────────────────────────────
+  const indexEntries = bookmarks.map(buildIndexEntry)
 
-    let semTags = ''
-    if (b.semanticTags && b.semanticTags !== '[]') {
-      try {
-        semTags = ` [sem:${(JSON.parse(b.semanticTags) as string[]).slice(0, 20).join(',')}]`
-      } catch { /* ignore */ }
-    }
+  // ── Step 3: Compose a better prompt ───────────────────────────────────────
+  const prompt = `You are an expert semantic search engine for a personal Twitter/X bookmark knowledge base. Find bookmarks that genuinely match what the user wants — even when exact words don't appear.
 
-    let hashtags = ''
-    if (b.entities) {
-      try {
-        const ent = JSON.parse(b.entities) as { hashtags?: string[]; tools?: string[] }
-        const tags = [...(ent.hashtags ?? []), ...(ent.tools ?? [])].slice(0, 6)
-        if (tags.length) hashtags = ` [#{${tags.join(',')}}]`
-      } catch { /* ignore */ }
-    }
+USER QUERY: "${query}"
+${category ? `RESTRICTED TO CATEGORY: "${category}"` : ''}
 
-    const cats = b.categories.map((bc) => bc.category.slug).join(',')
-    return `${b.id}|@${b.authorHandle}: ${b.text.slice(0, 200)} ${mediaContext}${semTags}${hashtags}|[${cats}]`
-  })
+HOW TO SEARCH:
+1. Understand INTENT first: what topic, emotion, visual, or use-case is the user after?
+2. Check ALL fields — the ai_tags field contains pre-computed semantic context and is highly reliable
+3. Consider synonyms and indirect matches: "identity verification problems" matches "bad KYC practices"
+4. For visual/meme queries: weight media fields heavily (scene, action, ocr text IN the image, vtags)
+5. Indirect signals count: if categories say "finance-crypto(0.9)" and query is about investing → likely relevant
+6. Score generously for semantic neighbors (0.4+), reserve 0.9+ for clear matches
 
-  const isMemeQuery = /meme|funny|laugh|lol|joke|humor|memes/i.test(query)
-  const isVisualQuery = /image|photo|picture|chart|screenshot|graph|diagram|logo|icon|video/i.test(query)
-
-  const prompt = `You are a precise semantic bookmark search engine.
-
-User query: "${query}"
-${category ? `Category filter: "${category}"` : ''}
-
-${isMemeQuery ? 'MEME SEARCH: Match visual humor descriptions in [photo:...] and [gif:...] tags. Prioritize bookmarks tagged funny-memes.' : ''}
-${isVisualQuery ? 'VISUAL SEARCH: Prioritize matches in image/video context sections ([photo:...], [video:...]).' : ''}
-
-Search index format per line:
-  id | @author: tweet_text [type:scene:X|action:Y|text:"OCR"|tags:...] [sem:ai_tags] [#{hashtags}] | [categories]
-
-KEY: text:"..." = text visible IN the image (OCR) — match this for image text queries
-     tags: = visual search tags    sem: = AI semantic tags    #{} = hashtags
+BOOKMARK FORMAT:
+[bookmark_id]
+text: tweet text (most direct signal)
+media: type | style | scene | action | mood | meme=template | ocr="text inside image" | objects | vtags=visual tags
+ai_tags: AI-generated search tags (pre-computed, highly reliable)
+#hashtags | tools: detected tools/products | @mentions
+categories: assigned categories with confidence scores
 
 BOOKMARKS (${bookmarks.length} total):
-${index.join('\n')}
+${indexEntries.join('\n---\n')}
 
-Return ONLY valid JSON:
+Return ONLY valid JSON — no markdown, no prose outside the JSON object:
 {
+  "queryIntent": "one phrase describing what the user wants",
   "matches": [
-    { "id": "bookmark_id", "score": 0.95, "reason": "why ≤10 words" }
+    { "id": "bookmark_id", "score": 0.0-1.0, "reason": "≤10 words why it matches" }
   ],
-  "explanation": "one sentence"
+  "explanation": "one sentence summarizing what was found and why"
 }
 
-Rules:
-- Return 1-10 best matches, ranked by score (0.0-1.0)
-- Minimum score threshold: 0.35
-- Match semantically — synonyms, related concepts, visual descriptions
-- If query mentions text that appears in images, check text:"..." field`
+Constraints:
+- Up to 15 matches, sorted by score descending
+- Minimum score 0.30 — be generous for semantically close matches
+- Never repeat an id
+- Only return ids from the list above
+- reason must be specific, not generic ("shows bitcoin price crash chart" not "related to crypto")`
 
-  let aiResponse: { matches: { id: string; score: number; reason: string }[]; explanation: string }
+  let aiResponse: { queryIntent?: string; matches: { id: string; score: number; reason: string }[]; explanation: string }
 
   try {
     const msg = await client.messages.create({
       model,
-      max_tokens: 1024,
+      max_tokens: 1500,
       messages: [{ role: 'user', content: prompt }],
     })
-    const text = msg.content.find((b) => b.type === 'text')?.text ?? '{}'
-    const jsonMatch = text.match(/\{[\s\S]*\}/)
+    const rawText = msg.content.find((b) => b.type === 'text')?.text ?? '{}'
+    const jsonMatch = rawText.match(/\{[\s\S]*\}/)
     aiResponse = jsonMatch
       ? (JSON.parse(jsonMatch[0]) as typeof aiResponse)
       : { matches: [], explanation: 'No results found.' }
@@ -247,7 +378,7 @@ Rules:
     return NextResponse.json({ error: `AI search failed: ${msg}` }, { status: 500 })
   }
 
-  // ── Step 3: Hydrate from in-memory map (no second DB query needed) ─────────
+  // ── Step 4: Hydrate results ────────────────────────────────────────────────
   const bookmarkById = new Map(bookmarks.map((b) => [b.id, b]))
   const matchMap = new Map(aiResponse.matches.map((m) => [m.id, m]))
 
@@ -265,18 +396,11 @@ Rules:
         tweetCreatedAt: b.tweetCreatedAt?.toISOString() ?? null,
         importedAt: b.importedAt.toISOString(),
         mediaItems: b.mediaItems.map((m) => ({
-          id: m.id,
-          type: m.type,
-          url: m.url,
-          thumbnailUrl: m.thumbnailUrl,
-          imageTags: m.imageTags ?? null,
+          id: m.id, type: m.type, url: m.url, thumbnailUrl: m.thumbnailUrl, imageTags: m.imageTags ?? null,
         })),
         categories: b.categories.map((bc) => ({
-          id: bc.category.id,
-          name: bc.category.name,
-          slug: bc.category.slug,
-          color: bc.category.color,
-          confidence: bc.confidence,
+          id: bc.category.id, name: bc.category.name, slug: bc.category.slug,
+          color: bc.category.color, confidence: bc.confidence,
         })),
         aiScore: matchMap.get(b.id)?.score ?? 0,
         aiReason: matchMap.get(b.id)?.reason ?? '',
@@ -286,6 +410,5 @@ Rules:
 
   const response = { bookmarks: results, explanation: aiResponse.explanation }
   setCache(cacheKey, response)
-
   return NextResponse.json(response)
 }

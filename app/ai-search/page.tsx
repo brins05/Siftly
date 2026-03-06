@@ -227,13 +227,13 @@ export default function AISearchPage() {
               {results.length} result{results.length !== 1 ? 's' : ''}
             </span>
           </div>
-          <div className="grid grid-cols-1 gap-3">
+          <div className="flex flex-col gap-6">
             {results.map((b) => (
-              <div key={b.id} className="relative">
+              <div key={b.id}>
                 {b.aiReason && (
-                  <div className="flex items-center gap-1.5 mb-1.5 px-1">
-                    <Sparkles size={10} className="text-indigo-400 shrink-0" />
-                    <span className="text-xs text-indigo-400/80">{b.aiReason}</span>
+                  <div className="flex items-start gap-1.5 mb-2 px-1">
+                    <Sparkles size={10} className="text-indigo-400 shrink-0 mt-0.5" />
+                    <span className="text-xs text-indigo-400/80 leading-relaxed">{b.aiReason}</span>
                   </div>
                 )}
                 {/* Cast to BookmarkWithMedia since BookmarkCard does not use the AI-specific fields */}

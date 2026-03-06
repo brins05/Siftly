@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
 import prisma from '@/lib/db'
+import { buildImageContext } from '@/lib/image-context'
 
 const BATCH_SIZE = 20
 
@@ -68,7 +69,8 @@ const DEFAULT_CATEGORIES = [
   },
 ] as const
 
-const CATEGORY_SLUGS = DEFAULT_CATEGORIES.map((c) => c.slug)
+// Default slugs only used for seeding — all runtime categorization uses DB slugs
+const DEFAULT_SLUGS = DEFAULT_CATEGORIES.map((c) => c.slug)
 
 interface BookmarkForCategorization {
   tweetId: string
@@ -106,9 +108,16 @@ export async function seedDefaultCategories(): Promise<void> {
   }
 }
 
+// Module-level model cache — avoids redundant DB queries per batch
+let _cachedModel: string | null = null
+let _modelCacheExpiry = 0
+
 async function getAnthropicModel(): Promise<string> {
+  if (_cachedModel && Date.now() < _modelCacheExpiry) return _cachedModel
   const setting = await prisma.setting.findUnique({ where: { key: 'anthropicModel' } })
-  return setting?.value ?? 'claude-haiku-4-5-20251001'
+  _cachedModel = setting?.value ?? 'claude-haiku-4-5-20251001'
+  _modelCacheExpiry = Date.now() + 5 * 60 * 1000
+  return _cachedModel
 }
 
 async function getApiKey(overrideKey?: string): Promise<string> {
@@ -125,31 +134,14 @@ async function getApiKey(overrideKey?: string): Promise<string> {
   )
 }
 
-function buildImageContext(rawImageTags: string | undefined): string {
-  if (!rawImageTags) return ''
-  try {
-    const parsed = JSON.parse(rawImageTags) as Record<string, unknown>
-    const parts: string[] = []
-    if (parsed.style) parts.push(`Style: ${parsed.style}`)
-    if (parsed.scene) parts.push(`Scene: ${parsed.scene}`)
-    if (parsed.action) parts.push(`Action: ${parsed.action}`)
-    if (Array.isArray(parsed.text_ocr) && (parsed.text_ocr as unknown[]).length)
-      parts.push(`Text: ${(parsed.text_ocr as string[]).join(' | ').slice(0, 200)}`)
-    if (Array.isArray(parsed.tags) && (parsed.tags as unknown[]).length)
-      parts.push(`Visual tags: ${(parsed.tags as string[]).slice(0, 15).join(', ')}`)
-    if (parsed.meme_template) parts.push(`Meme: ${parsed.meme_template}`)
-    return parts.join(' | ')
-  } catch {
-    return rawImageTags.slice(0, 300)
-  }
-}
 
 function buildCategorizationPrompt(
   bookmarks: BookmarkForCategorization[],
   categoryDescriptions: Record<string, string>,
+  allSlugs: string[],
 ): string {
-  const categoriesList = CATEGORY_SLUGS.map(
-    (slug) => `- ${slug}: ${categoryDescriptions[slug] ?? ''}`,
+  const categoriesList = allSlugs.map(
+    (slug) => `- ${slug}: ${categoryDescriptions[slug] ?? slug.replace(/-/g, ' ')}`,
   ).join('\n')
 
   const tweetData = bookmarks.map((b) => {
@@ -162,21 +154,31 @@ function buildCategorizationPrompt(
     return entry
   })
 
-  return `You are categorizing Twitter bookmarks into a personal knowledge library.
+  return `You are an expert librarian categorizing Twitter/X bookmarks into a personal knowledge base. Your categorizations directly power search and discovery — accuracy is critical.
 
 AVAILABLE CATEGORIES:
 ${categoriesList}
 
-RULES:
-- Assign 1-3 categories per bookmark (only what clearly applies — prefer specificity)
-- Score confidence 0.5-1.0 per category based on how well it fits
-- Use ALL context: text, images, OCR text, hashtags, tools, visual style
-- If image shows a financial chart → finance-crypto (even if text says nothing)
-- If image contains code or a GitHub screenshot → dev-tools
-- If image is clearly a meme or funny → funny-memes (high confidence)
-- "general" only as last resort when nothing else fits
+CATEGORIZATION RULES:
+- Assign 1-3 categories per bookmark — only what CLEARLY applies
+- Confidence 0.5-1.0: use 0.9+ for obvious fits, 0.6-0.8 for plausible, 0.5 for borderline
+- Priority: specific categories beat "general" — only use "general" when truly nothing else fits
+- Use ALL signals: tweet text, image analysis, OCR text inside images, hashtags, detected tools, semantic AI tags
 
-Return ONLY valid JSON (no other text):
+SIGNAL WEIGHTING (use all, not just text):
+- Image shows financial chart, price action, wallet UI → finance-crypto (even if tweet text is vague)
+- Image shows code, terminal, GitHub, a dev tool UI → dev-tools
+- Image is clearly a meme format or labeled as humor/satire → funny-memes with high confidence
+- Tools field mentions GitHub/Vercel/React/etc → dev-tools likely applies
+- aiTags field is pre-computed context — trust it heavily for category signals
+- Hashtags like #bitcoin #eth → finance-crypto; #buildinpublic #saas → dev-tools/productivity
+
+AVOID:
+- Over-assigning "general" — it's a catch-all, not a default
+- Conflating news about AI with AI resources (a news thread about OpenAI is "news", not "ai-resources")
+- Assigning categories based only on passing mentions (a dev tweet that mentions a price = dev-tools, not finance)
+
+Return ONLY valid JSON — no markdown, no explanation:
 [{
   "tweetId": "123",
   "assignments": [
@@ -189,7 +191,7 @@ BOOKMARKS:
 ${JSON.stringify(tweetData, null, 1)}`
 }
 
-function parseCategorizationResponse(text: string): CategorizationResult[] {
+function parseCategorizationResponse(text: string, validSlugs: Set<string>): CategorizationResult[] {
   const jsonMatch = text.match(/\[[\s\S]*\]/)
   if (!jsonMatch) throw new Error('No JSON array found in Claude response')
 
@@ -205,7 +207,7 @@ function parseCategorizationResponse(text: string): CategorizationResult[] {
         category: String(a.category ?? ''),
         confidence: typeof a.confidence === 'number' ? Math.min(1, Math.max(0.5, a.confidence)) : 0.8,
       }))
-      .filter((a) => (CATEGORY_SLUGS as readonly string[]).includes(a.category))
+      .filter((a) => validSlugs.has(a.category))
 
     return { tweetId, assignments }
   })
@@ -215,6 +217,7 @@ export async function categorizeBatch(
   bookmarks: BookmarkForCategorization[],
   apiKey: string,
   categoryDescriptions: Record<string, string> = {},
+  allSlugs: string[] = DEFAULT_SLUGS,
 ): Promise<CategorizationResult[]> {
   if (bookmarks.length === 0) return []
 
@@ -224,7 +227,7 @@ export async function categorizeBatch(
   })
 
   const model = await getAnthropicModel()
-  const prompt = buildCategorizationPrompt(bookmarks, categoryDescriptions)
+  const prompt = buildCategorizationPrompt(bookmarks, categoryDescriptions, allSlugs)
 
   const message = await client.messages.create({
     model,
@@ -235,42 +238,107 @@ export async function categorizeBatch(
   const textBlock = message.content.find((b) => b.type === 'text')
   if (!textBlock || textBlock.type !== 'text') throw new Error('No text content in Claude response')
 
-  return parseCategorizationResponse(textBlock.text)
+  return parseCategorizationResponse(textBlock.text, new Set(allSlugs))
 }
 
 async function writeCategoryResults(results: CategorizationResult[]): Promise<void> {
   if (results.length === 0) return
 
-  const categories = await prisma.category.findMany({ select: { id: true, slug: true } })
+  const tweetIds = results.map((r) => r.tweetId).filter(Boolean)
+  if (tweetIds.length === 0) return
+
+  // Batch-fetch all categories and bookmarks at once (eliminates N+1 queries)
+  const [categories, bookmarks] = await Promise.all([
+    prisma.category.findMany({ select: { id: true, slug: true } }),
+    prisma.bookmark.findMany({
+      where: { tweetId: { in: tweetIds } },
+      select: { id: true, tweetId: true },
+    }),
+  ])
+
   const categoryBySlug = new Map(categories.map((c) => [c.slug, c.id]))
+  const bookmarkByTweetId = new Map(bookmarks.map((b) => [b.tweetId, b.id]))
+  const now = new Date()
+
+  // Collect all operations then execute in a single transaction (eliminates sequential await overhead)
+  const upsertOps: ReturnType<typeof prisma.bookmarkCategory.upsert>[] = []
+  const bookmarkIdsToUpdate: string[] = []
 
   for (const result of results) {
     if (!result.tweetId || result.assignments.length === 0) continue
-
-    const bookmark = await prisma.bookmark.findUnique({
-      where: { tweetId: result.tweetId },
-      select: { id: true },
-    })
-    if (!bookmark) continue
+    const bookmarkId = bookmarkByTweetId.get(result.tweetId)
+    if (!bookmarkId) continue
 
     for (const { category: slug, confidence } of result.assignments) {
       const categoryId = categoryBySlug.get(slug)
       if (!categoryId) continue
-
-      await prisma.bookmarkCategory.upsert({
-        where: { bookmarkId_categoryId: { bookmarkId: bookmark.id, categoryId } },
-        update: { confidence },
-        create: { bookmarkId: bookmark.id, categoryId, confidence },
-      })
+      upsertOps.push(
+        prisma.bookmarkCategory.upsert({
+          where: { bookmarkId_categoryId: { bookmarkId, categoryId } },
+          update: { confidence },
+          create: { bookmarkId, categoryId, confidence },
+        }),
+      )
     }
+    bookmarkIdsToUpdate.push(bookmarkId)
+  }
 
-    // Mark as enriched
-    await prisma.bookmark.update({
-      where: { id: bookmark.id },
-      data: { enrichedAt: new Date() },
-    })
+  if (upsertOps.length === 0) return
+
+  await prisma.$transaction([
+    ...upsertOps,
+    prisma.bookmark.updateMany({
+      where: { id: { in: bookmarkIdsToUpdate } },
+      data: { enrichedAt: now },
+    }),
+  ])
+}
+
+function mapBookmarkForCategorization(b: {
+  tweetId: string
+  text: string
+  semanticTags: string | null
+  entities: string | null
+  mediaItems: { imageTags: string | null }[]
+}): BookmarkForCategorization {
+  const allImageTags = b.mediaItems
+    .map((m) => m.imageTags)
+    .filter((t): t is string => t !== null && t !== '')
+    .join(' | ')
+
+  let semanticTags: string[] | undefined
+  if (b.semanticTags) {
+    try { semanticTags = JSON.parse(b.semanticTags) as string[] } catch { /* ignore */ }
+  }
+
+  let hashtags: string[] | undefined
+  let tools: string[] | undefined
+  if (b.entities) {
+    try {
+      const ent = JSON.parse(b.entities) as { hashtags?: string[]; tools?: string[] }
+      hashtags = ent.hashtags
+      tools = ent.tools
+    } catch { /* ignore */ }
+  }
+
+  return {
+    tweetId: b.tweetId,
+    text: b.text,
+    imageTags: allImageTags || undefined,
+    semanticTags,
+    hashtags,
+    tools,
   }
 }
+
+const BOOKMARK_SELECT = {
+  id: true,
+  tweetId: true,
+  text: true,
+  semanticTags: true,
+  entities: true,
+  mediaItems: { select: { imageTags: true } },
+} as const
 
 export async function categorizeAll(
   bookmarkIds: string[],
@@ -282,97 +350,74 @@ export async function categorizeAll(
 
   const apiKey = await getApiKey()
 
-  // Load category descriptions for the prompt
-  const dbCategories = await prisma.category.findMany({ select: { slug: true, description: true } })
+  // Load ALL categories (default + custom) for the prompt
+  const dbCategories = await prisma.category.findMany({ select: { slug: true, name: true, description: true } })
+  const allSlugs = dbCategories.map((c) => c.slug)
   const categoryDescriptions = Object.fromEntries(
-    dbCategories.map((c) => [c.slug, c.description ?? '']),
+    dbCategories.map((c) => [c.slug, c.description?.trim() || c.name]),
   )
 
-  const includeMedia = { select: { imageTags: true } } as const
-
-  let bookmarksQuery
+  // Get total count for progress reporting (without loading all rows)
+  let total = 0
   if (bookmarkIds.length > 0) {
-    bookmarksQuery = await prisma.bookmark.findMany({
-      where: { id: { in: bookmarkIds } },
-      select: {
-        id: true,
-        tweetId: true,
-        text: true,
-        semanticTags: true,
-        entities: true,
-        mediaItems: includeMedia,
-      },
-    })
+    total = bookmarkIds.length
   } else if (force) {
-    bookmarksQuery = await prisma.bookmark.findMany({
-      select: {
-        id: true,
-        tweetId: true,
-        text: true,
-        semanticTags: true,
-        entities: true,
-        mediaItems: includeMedia,
-      },
-    })
+    total = await prisma.bookmark.count()
   } else {
-    // Incremental: only process bookmarks not yet enriched
-    bookmarksQuery = await prisma.bookmark.findMany({
-      where: { enrichedAt: null },
-      select: {
-        id: true,
-        tweetId: true,
-        text: true,
-        semanticTags: true,
-        entities: true,
-        mediaItems: includeMedia,
-      },
-    })
+    total = await prisma.bookmark.count({ where: { enrichedAt: null } })
   }
 
-  const total = bookmarksQuery.length
   let done = 0
 
-  for (let i = 0; i < bookmarksQuery.length; i += BATCH_SIZE) {
-    if (shouldAbort?.()) break
-    const batch = bookmarksQuery.slice(i, i + BATCH_SIZE).map((b) => {
-      const allImageTags = b.mediaItems
-        .map((m) => m.imageTags)
-        .filter((t): t is string => t !== null && t !== '')
-        .join(' | ')
-
-      let semanticTags: string[] | undefined
-      if (b.semanticTags) {
-        try { semanticTags = JSON.parse(b.semanticTags) as string[] } catch { /* ignore */ }
+  if (bookmarkIds.length > 0) {
+    // Specific bookmark IDs — fetch in BATCH_SIZE chunks
+    for (let i = 0; i < bookmarkIds.length; i += BATCH_SIZE) {
+      if (shouldAbort?.()) break
+      const batchIds = bookmarkIds.slice(i, i + BATCH_SIZE)
+      const rows = await prisma.bookmark.findMany({
+        where: { id: { in: batchIds } },
+        select: BOOKMARK_SELECT,
+      })
+      const batch = rows.map(mapBookmarkForCategorization)
+      try {
+        const results = await categorizeBatch(batch, apiKey, categoryDescriptions, allSlugs)
+        await writeCategoryResults(results)
+      } catch (err) {
+        console.error(`Error categorizing batch at index ${i}:`, err)
       }
-
-      let hashtags: string[] | undefined
-      let tools: string[] | undefined
-      if (b.entities) {
-        try {
-          const ent = JSON.parse(b.entities) as { hashtags?: string[]; tools?: string[] }
-          hashtags = ent.hashtags
-          tools = ent.tools
-        } catch { /* ignore */ }
-      }
-
-      return {
-        tweetId: b.tweetId,
-        text: b.text,
-        imageTags: allImageTags || undefined,
-        semanticTags,
-        hashtags,
-        tools,
-      }
-    })
-
-    try {
-      const results = await categorizeBatch(batch, apiKey, categoryDescriptions)
-      await writeCategoryResults(results)
-    } catch (err) {
-      console.error(`Error categorizing batch at index ${i}:`, err)
+      done = Math.min(i + BATCH_SIZE, total)
+      onProgress?.(done, total)
     }
+  } else {
+    // Cursor-based pagination — never loads all bookmarks into memory
+    let cursor: string | undefined
+    const where = force ? {} : { enrichedAt: null }
 
-    done = Math.min(i + BATCH_SIZE, total)
-    onProgress?.(done, total)
+    while (true) {
+      if (shouldAbort?.()) break
+
+      const rows = await prisma.bookmark.findMany({
+        where: { ...where, ...(cursor ? { id: { gt: cursor } } : {}) },
+        orderBy: { id: 'asc' },
+        take: BATCH_SIZE,
+        select: BOOKMARK_SELECT,
+      })
+
+      if (rows.length === 0) break
+      cursor = rows[rows.length - 1].id
+
+      const batch = rows.map(mapBookmarkForCategorization)
+      try {
+        const results = await categorizeBatch(batch, apiKey, categoryDescriptions, allSlugs)
+        await writeCategoryResults(results)
+      } catch (err) {
+        console.error('Error categorizing batch:', err)
+      }
+
+      done += rows.length
+      onProgress?.(Math.min(done, total), total)
+
+      if (rows.length < BATCH_SIZE) break
+    }
   }
 }

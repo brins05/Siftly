@@ -4,6 +4,7 @@ import prisma from '@/lib/db'
 import { categorizeAll, seedDefaultCategories } from '@/lib/categorizer'
 import { analyzeAllUntagged, enrichAllBookmarks } from '@/lib/vision-analyzer'
 import { backfillEntities } from '@/lib/rawjson-extractor'
+import { rebuildFts } from '@/lib/fts'
 
 type Stage = 'vision' | 'entities' | 'enrichment' | 'categorize'
 
@@ -121,7 +122,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   setState({
     status: 'running',
-    stage: 'vision',
+    stage: 'entities',
     done: 0,
     total,
     stageCounts: { visionTagged: 0, entitiesExtracted: 0, enriched: 0, categorized: 0 },
@@ -158,7 +159,20 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
           await prisma.bookmark.updateMany({ where: { semanticTags: '[]' }, data: { semanticTags: null } })
         }
 
-        // Step 2: Analyze ALL untagged media (images, video thumbnails, gifs)
+        // Step 2: Extract entities from rawJson (zero API cost — runs first for instant progress)
+        if (!shouldAbort()) {
+          setState({ stage: 'entities' })
+          counts.entitiesExtracted = await backfillEntities((n) => {
+            counts.entitiesExtracted = n
+            setState({ stageCounts: { ...counts } })
+          }, shouldAbort).catch((err) => {
+            console.error('Entity extraction error:', err)
+            return counts.entitiesExtracted
+          })
+          setState({ stageCounts: { ...counts } })
+        }
+
+        // Step 3: Analyze ALL untagged media (images, video thumbnails, gifs)
         if (!shouldAbort()) {
           setState({ stage: 'vision' })
           counts.visionTagged = await analyzeAllUntagged(client, (n) => {
@@ -169,19 +183,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
             console.error('Vision analysis error:', msg)
             setState({ lastError: `Vision: ${msg.slice(0, 120)}` })
             return counts.visionTagged
-          })
-          setState({ stageCounts: { ...counts } })
-        }
-
-        // Step 3: Extract entities from rawJson (zero API cost)
-        if (!shouldAbort()) {
-          setState({ stage: 'entities' })
-          counts.entitiesExtracted = await backfillEntities((n) => {
-            counts.entitiesExtracted = n
-            setState({ stageCounts: { ...counts } })
-          }, shouldAbort).catch((err) => {
-            console.error('Entity extraction error:', err)
-            return counts.entitiesExtracted
           })
           setState({ stageCounts: { ...counts } })
         }
@@ -210,6 +211,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         counts.categorized = done
         setState({ done, total: runTotal, stageCounts: { ...counts } })
       }, force, shouldAbort)
+    }
+
+    // Step 6: Rebuild FTS5 search index (fast, local SQLite operation)
+    if (!shouldAbort()) {
+      await rebuildFts().catch((err) => console.error('FTS rebuild error:', err))
     }
   })()
     .then(() => {

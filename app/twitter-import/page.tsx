@@ -103,7 +103,7 @@ export default function TwitterImportPage() {
           rel="noopener noreferrer"
           className="inline-flex items-center gap-2 mt-5 px-4 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-sm font-medium transition-colors"
         >
-          Open x.com/bookmarks <ChevronRight size={14} />
+          Open x.com/i/bookmarks <ChevronRight size={14} />
         </a>
       </div>
 

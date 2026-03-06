@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Plus, Tag, X, ArrowRight, Folder } from 'lucide-react'
+import { Plus, Tag, X, ArrowRight, Folder, Bookmark } from 'lucide-react'
 import * as Dialog from '@radix-ui/react-dialog'
 import Link from 'next/link'
 import type { Category } from '@/lib/types'
@@ -197,7 +197,7 @@ function CategoryDisplayCard({ category }: CategoryDisplayCardProps) {
 
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full" style={{ backgroundColor: category.color }} />
+            <Bookmark size={14} style={{ color: category.color, fill: category.color }} className="shrink-0" />
             <span className="text-3xl font-bold text-zinc-100">{category.bookmarkCount.toLocaleString()}</span>
           </div>
           <Link
@@ -231,13 +231,19 @@ function SkeletonCard() {
 
 export default function CategoriesPage() {
   const [categories, setCategories] = useState<Category[]>([])
+  const [totalBookmarks, setTotalBookmarks] = useState(0)
   const [loading, setLoading] = useState(true)
   const [modalOpen, setModalOpen] = useState(false)
 
   useEffect(() => {
-    fetch('/api/categories')
-      .then((r) => r.json())
-      .then((data) => setCategories(data.categories ?? []))
+    Promise.all([
+      fetch('/api/categories').then((r) => r.json()),
+      fetch('/api/stats').then((r) => r.json()),
+    ])
+      .then(([catData, statsData]) => {
+        setCategories(catData.categories ?? [])
+        if (statsData.totalBookmarks !== undefined) setTotalBookmarks(statsData.totalBookmarks)
+      })
       .catch(console.error)
       .finally(() => setLoading(false))
   }, [])
@@ -245,8 +251,6 @@ export default function CategoriesPage() {
   function handleAdd(category: Category) {
     setCategories((prev) => [...prev, category])
   }
-
-  const totalBookmarks = categories.reduce((sum, c) => sum + c.bookmarkCount, 0)
 
   return (
     <div className="p-6 md:p-8 max-w-7xl mx-auto">

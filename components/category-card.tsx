@@ -1,4 +1,5 @@
 import Link from 'next/link'
+import { Bookmark } from 'lucide-react'
 import type { Category } from '@/lib/types'
 
 interface CategoryCardProps {
@@ -14,9 +15,10 @@ export default function CategoryCard({ category }: CategoryCardProps) {
     >
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-center gap-2.5 min-w-0">
-          <div
-            className="w-2.5 h-2.5 rounded-full shrink-0"
-            style={{ backgroundColor: category.color }}
+          <Bookmark
+            size={13}
+            className="shrink-0"
+            style={{ color: category.color, fill: category.color }}
           />
           <span className="font-semibold text-zinc-100 text-sm truncate">{category.name}</span>
         </div>

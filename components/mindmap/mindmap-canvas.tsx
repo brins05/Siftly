@@ -12,10 +12,12 @@ import {
   type NodeMouseHandler,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
+import { Type } from 'lucide-react'
 import RootNode from './root-node'
 import CategoryNode from './category-node'
 import TweetNode from './tweet-node'
 import ChainEdge from './chain-edge'
+import { MindmapContext } from './mindmap-context'
 
 const nodeTypes = { root: RootNode, category: CategoryNode, tweet: TweetNode }
 const edgeTypes = { chain: ChainEdge }
@@ -27,9 +29,10 @@ function layoutTweetNodes(nodes: Node[], center: Node): Node[] {
   const count = nodes.length
   return nodes.map((n, i) => {
     const angle = i * GOLDEN_ANGLE
-    // Tighter radius — Arkham style: dense and readable
+    // Scale radius with count so nodes never overlap, even at 100+ bookmarks
     const t = count > 1 ? (i + 0.5) / count : 0.5
-    const radius = 130 + 320 * Math.sqrt(t)
+    const maxRadius = Math.max(400, 80 * Math.sqrt(count))
+    const radius = 110 + maxRadius * Math.sqrt(t)
     return {
       ...n,
       position: {
@@ -56,6 +59,7 @@ export default function MindmapCanvas({ initialNodes, initialEdges }: MindmapCan
   const [focusedSlug, setFocusedSlug] = useState<string | null>(null)
   const [tweetCache, setTweetCache] = useState<Record<string, { nodes: Node[]; edges: Edge[] }>>({})
   const [bgColor, setBgColor] = useState('#111113')
+  const [showLabels, setShowLabels] = useState(false)
 
   useEffect(() => {
     const update = () => setBgColor(document.documentElement.classList.contains('light') ? '#ececef' : '#111113')
@@ -125,16 +129,33 @@ export default function MindmapCanvas({ initialNodes, initialEdges }: MindmapCan
   }, [viewMode, focusedSlug, tweetCache, setNodes, setEdges, resetToCategories])
 
   return (
+    <MindmapContext.Provider value={{ showLabels }}>
     <div className="relative w-full h-full">
-      {/* Back button */}
-      {viewMode === 'focused' && (
-        <button
-          onClick={resetToCategories}
-          className="absolute top-4 left-4 z-10 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-900/90 border border-zinc-700 text-zinc-300 text-sm hover:bg-zinc-800 hover:text-zinc-100 transition-colors backdrop-blur-sm"
-        >
-          ← All categories
-        </button>
-      )}
+      {/* Top-left controls */}
+      <div className="absolute top-4 left-4 z-10 flex items-center gap-2">
+        {viewMode === 'focused' && (
+          <button
+            onClick={resetToCategories}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-900/90 border border-zinc-700 text-zinc-300 text-sm hover:bg-zinc-800 hover:text-zinc-100 transition-colors backdrop-blur-sm"
+          >
+            ← All categories
+          </button>
+        )}
+        {viewMode === 'focused' && (
+          <button
+            onClick={() => setShowLabels((v) => !v)}
+            title={showLabels ? 'Hide labels' : 'Show labels'}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-sm transition-colors backdrop-blur-sm ${
+              showLabels
+                ? 'bg-indigo-600/80 border-indigo-500 text-white'
+                : 'bg-zinc-900/90 border-zinc-700 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800'
+            }`}
+          >
+            <Type size={13} />
+            Labels
+          </button>
+        )}
+      </div>
 
       <ReactFlow
         nodes={nodes}
@@ -167,5 +188,6 @@ export default function MindmapCanvas({ initialNodes, initialEdges }: MindmapCan
         {viewMode === 'categories' ? 'Click a category to explore its bookmarks' : 'Drag any bubble · Click ← to go back'}
       </div>
     </div>
+    </MindmapContext.Provider>
   )
 }

@@ -2,7 +2,7 @@
 
 import { useState, useRef, useCallback, useEffect } from 'react'
 import Link from 'next/link'
-import { Upload, CheckCircle, ChevronRight, Loader2, Copy, Check, ExternalLink } from 'lucide-react'
+import { Upload, CheckCircle, ChevronRight, Loader2, Copy, Check, ExternalLink, Sparkles } from 'lucide-react'
 import * as Progress from '@radix-ui/react-progress'
 
 type Step = 1 | 2 | 3
@@ -24,7 +24,7 @@ interface CategorizeStatus {
 
 const BOOKMARKLET_SCRIPT = `(async function(){
   if(!location.hostname.includes('twitter.com')&&!location.hostname.includes('x.com')){
-    showToast('\u274c Please navigate to x.com/bookmarks first','#ef4444');return;
+    showToast('\u274c Please navigate to x.com/i/bookmarks first','#ef4444');return;
   }
   function showToast(msg,bg){
     var t=document.createElement('div');t.innerHTML=msg;
@@ -164,7 +164,7 @@ const BOOKMARKLET_HREF = `javascript:${encodeURIComponent(BOOKMARKLET_SCRIPT)}`
 
 const CONSOLE_SCRIPT = `(async function() {
   if (!location.hostname.includes('twitter.com') && !location.hostname.includes('x.com')) {
-    alert('Run this on x.com/bookmarks'); return;
+    alert('Run this on x.com/i/bookmarks'); return;
   }
   const all = [], seen = new Set();
   function addTweet(t) {
@@ -458,12 +458,12 @@ function BookmarkletTab({ onFile }: { onFile: (file: File) => void }) {
         <span>
           Go to{' '}
           <a
-            href="https://x.com/bookmarks"
+            href="https://x.com/i/bookmarks"
             target="_blank"
             rel="noopener noreferrer"
             className="text-indigo-400 hover:underline inline-flex items-center gap-1"
           >
-            x.com/bookmarks <ExternalLink size={11} />
+            x.com/i/bookmarks <ExternalLink size={11} />
           </a>{' '}
           while logged in
         </span>
@@ -531,12 +531,12 @@ function ConsoleTab({ onFile }: { onFile: (file: File) => void }) {
         <span>
           Go to{' '}
           <a
-            href="https://x.com/bookmarks"
+            href="https://x.com/i/bookmarks"
             target="_blank"
             rel="noopener noreferrer"
             className="text-indigo-400 hover:underline inline-flex items-center gap-1"
           >
-            x.com/bookmarks <ExternalLink size={11} />
+            x.com/i/bookmarks <ExternalLink size={11} />
           </a>{' '}
           while logged in
         </span>
@@ -644,9 +644,8 @@ function InstructionsStep({ onFile }: { onFile: (file: File) => void }) {
   )
 }
 
-function ImportingStep({ result, onCategorize }: {
+function ImportingStep({ result }: {
   result: ImportResult | null
-  onCategorize: () => void
 }) {
   if (!result) {
     return (
@@ -670,13 +669,10 @@ function ImportingStep({ result, onCategorize }: {
           <span className="text-zinc-500">{result.skipped} skipped</span> as duplicates
         </p>
       </div>
-      <button
-        onClick={onCategorize}
-        className="flex items-center gap-2 px-6 py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium transition-colors"
-      >
-        Categorize with AI
-        <ChevronRight size={16} />
-      </button>
+      <div className="flex items-center gap-2 text-indigo-400 text-sm">
+        <Loader2 size={14} className="animate-spin" />
+        Starting AI categorization…
+      </div>
     </div>
   )
 }
@@ -686,6 +682,12 @@ function CategorizeStep() {
   const [running, setRunning] = useState(false)
   const [done, setDone] = useState(false)
   const [error, setError] = useState('')
+
+  // Auto-start on mount
+  useEffect(() => {
+    void startCategorization()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   async function startCategorization() {
     setError('')
@@ -722,14 +724,14 @@ function CategorizeStep() {
 
   return (
     <div className="space-y-6">
-      {!running && !done && (
+      {!running && !done && error && (
         <div className="space-y-3">
-          {error && <p className="text-sm text-red-400">{error}</p>}
+          <p className="text-sm text-red-400">{error}</p>
           <button
-            onClick={startCategorization}
+            onClick={() => void startCategorization()}
             className="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium transition-colors"
           >
-            Start Categorization
+            Retry Categorization
           </button>
         </div>
       )}
@@ -774,6 +776,43 @@ function CategorizeStep() {
   )
 }
 
+function UncategorizedBanner({ onCategorize }: { onCategorize: () => void }) {
+  const [totalBookmarks, setTotalBookmarks] = useState<number | null>(null)
+  const [uncategorized, setUncategorized] = useState<number | null>(null)
+
+  useEffect(() => {
+    fetch('/api/stats')
+      .then((r) => r.json())
+      .then((d: { totalBookmarks?: number; totalCategories?: number }) => {
+        const total = d.totalBookmarks ?? 0
+        const hasCategories = (d.totalCategories ?? 0) > 0
+        setTotalBookmarks(total)
+        setUncategorized(hasCategories ? 0 : total)
+      })
+      .catch(() => {})
+  }, [])
+
+  if (!uncategorized || uncategorized === 0) return null
+
+  return (
+    <div className="flex items-center justify-between gap-4 mb-6 px-4 py-3.5 rounded-xl bg-indigo-500/10 border border-indigo-500/25">
+      <div className="flex items-center gap-2.5 min-w-0">
+        <Sparkles size={15} className="text-indigo-400 shrink-0" />
+        <p className="text-sm text-indigo-300">
+          <span className="font-semibold">{totalBookmarks?.toLocaleString()}</span> bookmarks imported but not yet categorized
+        </p>
+      </div>
+      <button
+        onClick={onCategorize}
+        className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition-colors shrink-0"
+      >
+        <Sparkles size={12} />
+        AI Categorize
+      </button>
+    </div>
+  )
+}
+
 export default function ImportPage() {
   const [step, setStep] = useState<Step>(1)
   const [importResult, setImportResult] = useState<ImportResult | null>(null)
@@ -792,11 +831,15 @@ export default function ImportPage() {
 
       if (!res.ok) throw new Error(data.error ?? 'Import failed')
 
-      setImportResult({
+      const result: ImportResult = {
         imported: data.imported ?? data.count ?? 0,
         skipped: data.skipped ?? 0,
         total: (data.imported ?? data.count ?? 0) + (data.skipped ?? 0),
-      })
+      }
+      setImportResult(result)
+
+      // Auto-advance to categorization after a brief moment to show the result
+      setTimeout(() => setStep(3), 1500)
     } catch (err) {
       console.error('Import error:', err)
       setImportResult({ imported: 0, skipped: 0, total: 0 })
@@ -812,6 +855,8 @@ export default function ImportPage() {
         <p className="text-zinc-400 mt-1">Export your X/Twitter bookmarks as JSON, then upload below.</p>
       </div>
 
+      {step === 1 && <UncategorizedBanner onCategorize={() => setStep(3)} />}
+
       <StepIndicator current={step} />
 
       <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6">
@@ -819,7 +864,6 @@ export default function ImportPage() {
         {step === 2 && (
           <ImportingStep
             result={importing ? null : importResult}
-            onCategorize={() => setStep(3)}
           />
         )}
         {step === 3 && <CategorizeStep />}

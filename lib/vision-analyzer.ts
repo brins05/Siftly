@@ -1,9 +1,17 @@
 import Anthropic from '@anthropic-ai/sdk'
 import prisma from '@/lib/db'
+import { buildImageContext } from '@/lib/image-context'
+
+// Module-level model cache — avoids hundreds of DB roundtrips per pipeline run
+let _cachedModel: string | null = null
+let _modelCacheExpiry = 0
 
 async function getAnthropicModel(): Promise<string> {
+  if (_cachedModel && Date.now() < _modelCacheExpiry) return _cachedModel
   const setting = await prisma.setting.findUnique({ where: { key: 'anthropicModel' } })
-  return setting?.value ?? 'claude-haiku-4-5-20251001'
+  _cachedModel = setting?.value ?? 'claude-haiku-4-5-20251001'
+  _modelCacheExpiry = Date.now() + 5 * 60 * 1000
+  return _cachedModel
 }
 
 type AllowedMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'
@@ -67,7 +75,7 @@ Rules:
 - GOOD tags: "bitcoin price chart", "react hooks", "frustrated man", "gpt-4", "bull market"`
 
 const RETRY_DELAYS_MS = [1500, 4000, 10000]
-const CONCURRENCY = 3
+const CONCURRENCY = 6
 
 async function analyzeImageWithRetry(
   url: string,
@@ -278,96 +286,93 @@ export async function analyzeAllUntagged(
   return total
 }
 
-/**
- * Generate bookmark-level semantic tags from tweet text + all image tags.
- * Stores JSON tag array in Bookmark.semanticTags.
- */
-export async function enrichBookmarkSemanticTags(
-  bookmarkId: string,
-  tweetText: string,
-  imageTags: string[],
-  client: Anthropic,
+// ── Batch semantic enrichment ──────────────────────────────────────────────────
+
+const ENRICH_BATCH_SIZE = 8
+const ENRICH_CONCURRENCY = 4
+
+interface BookmarkForEnrichment {
+  id: string
+  text: string
+  imageTags: string[] // filtered, non-empty
   entities?: {
     hashtags?: string[]
     urls?: string[]
     mentions?: string[]
     tools?: string[]
     tweetType?: string
-  },
-): Promise<string[]> {
-  // Parse structured imageTags JSON if available
-  const imageContextParts: string[] = []
-  for (const raw of imageTags.filter(Boolean)) {
-    try {
-      const parsed = JSON.parse(raw) as Record<string, unknown>
-      const parts: string[] = []
-      if (parsed.scene) parts.push(`Scene: ${parsed.scene}`)
-      if (parsed.action) parts.push(`Action: ${parsed.action}`)
-      if (Array.isArray(parsed.text_ocr) && parsed.text_ocr.length)
-        parts.push(`Text in image: ${(parsed.text_ocr as string[]).join(' | ')}`)
-      if (Array.isArray(parsed.objects) && parsed.objects.length)
-        parts.push(`Objects: ${(parsed.objects as string[]).join(', ')}`)
-      if (Array.isArray(parsed.tags) && parsed.tags.length)
-        parts.push(`Visual tags: ${(parsed.tags as string[]).slice(0, 20).join(', ')}`)
-      if (parsed.meme_template) parts.push(`Meme: ${parsed.meme_template}`)
-      imageContextParts.push(parts.join('\n'))
-    } catch {
-      imageContextParts.push(raw.slice(0, 400))
-    }
   }
+}
 
-  const entityContext = entities
-    ? [
-        entities.hashtags?.length ? `Hashtags: ${entities.hashtags.join(', ')}` : '',
-        entities.tools?.length ? `Tools/Products mentioned: ${entities.tools.join(', ')}` : '',
-        entities.mentions?.length ? `Accounts mentioned: @${entities.mentions.join(', @')}` : '',
-        entities.tweetType && entities.tweetType !== 'original' ? `Tweet type: ${entities.tweetType}` : '',
-      ]
-        .filter(Boolean)
-        .join('\n')
-    : ''
+interface EnrichmentResult {
+  id: string
+  tags: string[]
+  sentiment: string
+  people: string[]
+  companies: string[]
+}
 
-  const prompt = `Generate 30-50 precise semantic search tags for this Twitter bookmark.
+function buildEnrichmentPrompt(bookmarks: BookmarkForEnrichment[]): string {
+  const items = bookmarks.map((b) => {
+    const entry: Record<string, unknown> = { id: b.id, text: b.text.slice(0, 500) }
+    const imgCtx = b.imageTags.map((raw) => buildImageContext(raw)).filter(Boolean).join(' | ')
+    if (imgCtx) entry.imageContext = imgCtx
+    if (b.entities?.hashtags?.length) entry.hashtags = b.entities.hashtags.slice(0, 8)
+    if (b.entities?.tools?.length) entry.tools = b.entities.tools
+    if (b.entities?.mentions?.length) entry.mentions = b.entities.mentions.slice(0, 3)
+    return entry
+  })
 
-Tweet: "${tweetText.slice(0, 600)}"
-${entityContext ? `\nContext:\n${entityContext}` : ''}
-${imageContextParts.length ? `\nImage analysis:\n${imageContextParts.join('\n---\n')}` : ''}
+  return `Generate search tags and metadata for each of these Twitter/X bookmarks.
 
-Generate tags covering:
-1. SPECIFIC TOPICS: exact tool names, technologies, people, companies (not generic)
-2. ACTIONS: what someone can DO with this (learn X, use Y, build Z)
-3. VISUAL: what is shown (chart type, meme name, screenshot of what app)
-4. SYNONYMS: alternative terms someone might search
-5. CONTEXT: when would someone want this? (starting a startup, learning to code, investing)
-6. EMOTIONS: why did they bookmark this? (inspiring, funny, useful reference, how-to)
+For each bookmark return:
+- tags: 25-35 specific semantic search tags covering entities, actions, visual content, synonyms, and emotional signals
+- sentiment: one of "positive", "negative", "neutral", "humorous", "controversial"
+- people: named people mentioned or shown (max 5, empty array if none)
+- companies: company/product/tool names explicitly referenced (max 8, empty array if none)
 
-Return ONLY a JSON array, most-important tags first:
-["tag1", "tag2", ...]
+Rules for tags:
+- 2-5 words max, specific beats generic
+- NO generic terms: "twitter post", "screenshot", "social media", "content"
+- YES to proper nouns, version numbers, specific concepts
+- Rank most-search-relevant tags first
 
-BAD tags: "twitter", "tweet", "social media", "post", "screenshot" (too generic)
-GOOD tags: "gpt-4 prompting", "bitcoin price crash", "react hooks tutorial", "elon musk", "yield farming"`
+Return ONLY valid JSON, no markdown:
+[{"id":"...","tags":[...],"sentiment":"...","people":[...],"companies":[...]}]
+
+BOOKMARKS:
+${JSON.stringify(items, null, 1)}`
+}
+
+async function enrichBatchSemanticTags(
+  bookmarks: BookmarkForEnrichment[],
+  client: Anthropic,
+): Promise<EnrichmentResult[]> {
+  if (bookmarks.length === 0) return []
+
+  const model = await getAnthropicModel()
+  const prompt = buildEnrichmentPrompt(bookmarks)
 
   try {
-    const model = await getAnthropicModel()
     const msg = await client.messages.create({
       model,
-      max_tokens: 500,
+      max_tokens: 2000,
       messages: [{ role: 'user', content: prompt }],
     })
     const text = msg.content.find((b) => b.type === 'text')?.text ?? ''
     const match = text.match(/\[[\s\S]*\]/)
     if (!match) return []
 
-    const tags: unknown = JSON.parse(match[0])
-    if (!Array.isArray(tags)) return []
-    const result = (tags as unknown[]).map((t) => String(t)).filter((t) => t.length > 0)
+    const parsed: unknown = JSON.parse(match[0])
+    if (!Array.isArray(parsed)) return []
 
-    await prisma.bookmark.update({
-      where: { id: bookmarkId },
-      data: { semanticTags: JSON.stringify(result) },
-    })
-
-    return result
+    return (parsed as Record<string, unknown>[]).map((item): EnrichmentResult => ({
+      id: String(item.id ?? ''),
+      tags: Array.isArray(item.tags) ? (item.tags as unknown[]).map(String).filter(Boolean) : [],
+      sentiment: String(item.sentiment ?? 'neutral'),
+      people: Array.isArray(item.people) ? (item.people as unknown[]).map(String).filter(Boolean) : [],
+      companies: Array.isArray(item.companies) ? (item.companies as unknown[]).map(String).filter(Boolean) : [],
+    })).filter((r) => r.id)
   } catch {
     return []
   }
@@ -375,20 +380,22 @@ GOOD tags: "gpt-4 prompting", "bitcoin price crash", "react hooks tutorial", "el
 
 /**
  * Run semantic enrichment for all bookmarks that have no semanticTags yet.
+ * Processes bookmarks in batches of ENRICH_BATCH_SIZE (one API call per batch)
+ * with ENRICH_CONCURRENCY parallel batches — 5-10x fewer API calls vs. per-bookmark.
  */
 export async function enrichAllBookmarks(
   client: Anthropic,
   onProgress?: (total: number) => void,
   shouldAbort?: () => boolean,
 ): Promise<number> {
-  const CHUNK = 50
+  const CHUNK = ENRICH_BATCH_SIZE * ENRICH_CONCURRENCY * 2 // fetch ahead of processing
   let enriched = 0
   let cursor: string | undefined
 
   while (true) {
     if (shouldAbort?.()) break
 
-    const bookmarks = await prisma.bookmark.findMany({
+    const rows = await prisma.bookmark.findMany({
       where: {
         semanticTags: null,
         ...(cursor ? { id: { gt: cursor } } : {}),
@@ -403,41 +410,122 @@ export async function enrichAllBookmarks(
       },
     })
 
-    if (bookmarks.length === 0) break
-    cursor = bookmarks[bookmarks.length - 1].id
+    if (rows.length === 0) break
+    cursor = rows[rows.length - 1].id
 
-    for (const b of bookmarks) {
-      if (shouldAbort?.()) break
+    // Separate bookmarks worth enriching from trivial ones (mark trivial immediately)
+    const trivialIds: string[] = []
+    const toEnrich: BookmarkForEnrichment[] = []
 
+    for (const b of rows) {
       const imageTags = b.mediaItems
         .map((m) => m.imageTags)
         .filter((t): t is string => t !== null && t !== '' && t !== '{}')
 
-      // Skip bookmarks with no content worth tagging; mark them so we don't retry
       if (imageTags.length === 0 && b.text.length < 20) {
-        await prisma.bookmark.update({ where: { id: b.id }, data: { semanticTags: '[]' } })
+        trivialIds.push(b.id)
         continue
       }
 
-      let entities: Parameters<typeof enrichBookmarkSemanticTags>[4] = undefined
+      let entities: BookmarkForEnrichment['entities'] = undefined
       if (b.entities) {
-        try {
-          entities = JSON.parse(b.entities) as typeof entities
-        } catch { /* ignore */ }
+        try { entities = JSON.parse(b.entities) as typeof entities } catch { /* ignore */ }
       }
 
-      const tags = await enrichBookmarkSemanticTags(b.id, b.text, imageTags, client, entities)
-      if (tags.length > 0) {
-        enriched++
-        onProgress?.(enriched)
-      } else {
-        // Mark as attempted so re-runs skip it (unless force)
-        await prisma.bookmark.update({ where: { id: b.id }, data: { semanticTags: '[]' } })
-      }
+      toEnrich.push({ id: b.id, text: b.text, imageTags, entities })
     }
 
-    if (bookmarks.length < CHUNK) break
+    // Mark trivial bookmarks in one batch
+    if (trivialIds.length > 0) {
+      await prisma.bookmark.updateMany({
+        where: { id: { in: trivialIds } },
+        data: { semanticTags: '[]' },
+      })
+    }
+
+    // Split into batches and process with concurrency
+    const batches: BookmarkForEnrichment[][] = []
+    for (let i = 0; i < toEnrich.length; i += ENRICH_BATCH_SIZE) {
+      batches.push(toEnrich.slice(i, i + ENRICH_BATCH_SIZE))
+    }
+
+    const batchTasks = batches.map((batch) => async () => {
+      if (shouldAbort?.()) return
+
+      const results = await enrichBatchSemanticTags(batch, client)
+      const resultMap = new Map(results.map((r) => [r.id, r]))
+
+      const updates: ReturnType<typeof prisma.bookmark.update>[] = []
+
+      for (const b of batch) {
+        const result = resultMap.get(b.id)
+        if (result?.tags.length) {
+          enriched++
+          onProgress?.(enriched)
+          updates.push(
+            prisma.bookmark.update({
+              where: { id: b.id },
+              data: {
+                semanticTags: JSON.stringify(result.tags),
+                enrichmentMeta: JSON.stringify({
+                  sentiment: result.sentiment,
+                  people: result.people,
+                  companies: result.companies,
+                }),
+              },
+            }),
+          )
+        } else {
+          updates.push(
+            prisma.bookmark.update({
+              where: { id: b.id },
+              data: { semanticTags: '[]' },
+            }),
+          )
+        }
+      }
+
+      if (updates.length > 0) {
+        await prisma.$transaction(updates)
+      }
+    })
+
+    await runWithConcurrency(batchTasks, ENRICH_CONCURRENCY)
+
+    if (rows.length < CHUNK) break
   }
 
   return enriched
+}
+
+/**
+ * Generate semantic tags for a single bookmark (used for on-demand re-enrichment).
+ * For bulk processing use enrichAllBookmarks instead.
+ */
+export async function enrichBookmarkSemanticTags(
+  bookmarkId: string,
+  tweetText: string,
+  imageTags: string[],
+  client: Anthropic,
+  entities?: BookmarkForEnrichment['entities'],
+): Promise<string[]> {
+  const results = await enrichBatchSemanticTags(
+    [{ id: bookmarkId, text: tweetText, imageTags, entities }],
+    client,
+  )
+  const result = results[0]
+  if (!result?.tags.length) return []
+
+  await prisma.bookmark.update({
+    where: { id: bookmarkId },
+    data: {
+      semanticTags: JSON.stringify(result.tags),
+      enrichmentMeta: JSON.stringify({
+        sentiment: result.sentiment,
+        people: result.people,
+        companies: result.companies,
+      }),
+    },
+  })
+  return result.tags
 }
