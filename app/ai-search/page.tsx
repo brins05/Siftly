@@ -34,6 +34,7 @@ export default function AISearchPage() {
   const [searched, setSearched] = useState(false)
   const [imageStats, setImageStats] = useState<ImageStats | null>(null)
   const [analyzing, setAnalyzing] = useState(false)
+  const [pipelineRunning, setPipelineRunning] = useState(false)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
   useEffect(() => {
@@ -42,6 +43,13 @@ export default function AISearchPage() {
     fetch('/api/analyze/images')
       .then((r) => r.json())
       .then((data: ImageStats) => setImageStats(data))
+      .catch(() => {})
+    // Hide standalone image analysis when the main pipeline is already handling it
+    fetch('/api/categorize')
+      .then((r) => r.json())
+      .then((d: { status: string }) => {
+        if (d.status === 'running' || d.status === 'stopping') setPipelineRunning(true)
+      })
       .catch(() => {})
   }, [])
 
@@ -155,8 +163,8 @@ export default function AISearchPage() {
       </div>
       <p className="text-xs text-zinc-600 mb-8 text-right">⌘+Enter to search</p>
 
-      {/* Image analysis status */}
-      {imageStats !== null && (
+      {/* Image analysis status — hidden while main pipeline is running (it handles vision internally) */}
+      {imageStats !== null && !pipelineRunning && (
         <div className="flex items-center gap-3 px-4 py-3 rounded-xl bg-zinc-900 border border-zinc-800 mb-6 text-xs">
           <ImageIcon size={13} className="text-zinc-500 shrink-0" />
           <div className="flex-1 min-w-0">
