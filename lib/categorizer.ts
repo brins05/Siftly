@@ -119,6 +119,7 @@ const DEFAULT_SLUGS = DEFAULT_CATEGORIES.map((c) => c.slug)
 interface BookmarkForCategorization {
   tweetId: string
   text: string
+  articleContent?: string
   imageTags?: string
   semanticTags?: string[]
   hashtags?: string[]
@@ -162,7 +163,9 @@ function buildCategorizationPrompt(
   ).join('\n')
 
   const tweetData = bookmarks.map((b) => {
-    const entry: Record<string, unknown> = { id: b.tweetId, text: b.text.slice(0, 400) }
+    const text = b.articleContent || b.text
+    const entry: Record<string, unknown> = { id: b.tweetId, text: text.slice(0, 600) }
+    if (b.articleContent) entry.isArticle = true
     const imgCtx = buildImageContext(b.imageTags)
     if (imgCtx) entry.images = imgCtx
     if (b.semanticTags?.length) entry.aiTags = b.semanticTags.slice(0, 20).join(', ')
@@ -346,6 +349,7 @@ export async function writeCategoryResults(results: CategorizationResult[]): Pro
 export function mapBookmarkForCategorization(b: {
   tweetId: string
   text: string
+  articleContent: string | null
   semanticTags: string | null
   entities: string | null
   mediaItems: { imageTags: string | null }[]
@@ -373,6 +377,7 @@ export function mapBookmarkForCategorization(b: {
   return {
     tweetId: b.tweetId,
     text: b.text,
+    articleContent: b.articleContent || undefined,
     imageTags: allImageTags || undefined,
     semanticTags,
     hashtags,
@@ -384,6 +389,7 @@ export const BOOKMARK_SELECT = {
   id: true,
   tweetId: true,
   text: true,
+  articleContent: true,
   semanticTags: true,
   entities: true,
   mediaItems: { select: { imageTags: true } },

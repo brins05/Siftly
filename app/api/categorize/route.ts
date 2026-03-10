@@ -16,9 +16,10 @@ import {
   BookmarkForEnrichment,
 } from '@/lib/vision-analyzer'
 import { backfillEntities } from '@/lib/rawjson-extractor'
+import { backfillArticleContent } from '@/lib/article-fetcher'
 import { rebuildFts } from '@/lib/fts'
 
-type Stage = 'vision' | 'entities' | 'enrichment' | 'categorize' | 'parallel'
+type Stage = 'vision' | 'entities' | 'articles' | 'enrichment' | 'categorize' | 'parallel'
 
 interface CategorizationState {
   status: 'idle' | 'running' | 'stopping'
@@ -181,6 +182,20 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
           setState({ stageCounts: { ...counts } })
         }
 
+        // Stage 1.5: Fetch X article content (free, no API key — uses syndication API)
+        if (!shouldAbort()) {
+          setState({ stage: 'articles' })
+          const articleCount = await backfillArticleContent((n) => {
+            setState({ stageCounts: { ...counts, entitiesExtracted: counts.entitiesExtracted } })
+          }, shouldAbort).catch((err) => {
+            console.error('Article fetch error:', err)
+            return 0
+          })
+          if (articleCount > 0) {
+            console.log(`[pipeline] Fetched content for ${articleCount} X articles`)
+          }
+        }
+
         // Stage 2: Parallel pipeline — vision + enrichment + categorize per bookmark
         if (!shouldAbort()) {
           // Fetch all bookmark IDs to process
@@ -261,6 +276,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
               select: {
                 id: true,
                 text: true,
+                articleContent: true,
                 semanticTags: true,
                 entities: true,
                 mediaItems: {
@@ -306,7 +322,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
                     .map((m) => m.imageTags)
                     .filter((t): t is string => t !== null && t !== '' && t !== '{}')
 
-              if (imageTags.length === 0 && bm.text.length < 20) {
+              const effectiveText = bm.articleContent || bm.text
+              if (imageTags.length === 0 && effectiveText.length < 20) {
                 // Trivial bookmark — skip enrichment
                 await prisma.bookmark.update({ where: { id: bm.id }, data: { semanticTags: '[]' } })
               } else {
@@ -318,7 +335,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
                 }
                 try {
                   const results = await enrichBatchSemanticTags(
-                    [{ id: bm.id, text: bm.text, imageTags, entities }],
+                    [{ id: bm.id, text: effectiveText, imageTags, entities }],
                     client,
                   )
                   const result = results[0]

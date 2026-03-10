@@ -22,7 +22,7 @@
 
 Siftly turns your Twitter/X bookmarks into a **searchable, categorized, visual knowledge base** — running entirely on your machine. No cloud, no subscriptions, no browser extensions required. Everything stays local except the AI API calls you configure.
 
-It runs a **4-stage AI pipeline** on your bookmarks:
+It runs a **5-stage AI pipeline** on your bookmarks:
 
 ```
 📥 Import (built-in bookmarklet or console script — no extensions needed)
@@ -163,6 +163,7 @@ Re-import anytime — Siftly automatically skips duplicates and only adds new bo
 | Stage | What it does |
 |-------|-------------|
 | **Entity Extraction** | Mines hashtags, URLs, @mentions, and 100+ known tool/product names from stored tweet JSON — free, zero API calls |
+| **Article Fetching** | Fetches full content for X article links (x.com/i/article/) via syndication API — free, no auth required |
 | **Vision Analysis** | Analyzes every image, GIF, and video thumbnail — OCR text, objects, scene, mood, meme templates, 30–40 visual tags per image |
 | **Semantic Tagging** | Generates 25–35 precise search tags per bookmark by combining tweet text + image context. Also extracts sentiment, people, and company names. |
 | **Categorization** | Assigns 1–3 categories per bookmark with confidence scores using all enriched data |
@@ -264,7 +265,7 @@ siftly/
 │   │   │   └── [id]/categories/ # Per-bookmark category management
 │   │   ├── categories/       # Category CRUD
 │   │   │   └── [slug]/       # Individual category operations
-│   │   ├── categorize/       # 4-stage AI pipeline (start, status, stop)
+│   │   ├── categorize/       # 5-stage AI pipeline (start, status, stop)
 │   │   ├── export/           # CSV, JSON, ZIP export
 │   │   ├── import/           # JSON file import with dedup + auto-pipeline trigger
 │   │   │   ├── bookmarklet/  # Bookmarklet-specific import endpoint

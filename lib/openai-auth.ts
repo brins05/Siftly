@@ -1,7 +1,15 @@
 import { readFileSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
-import OpenAI from 'openai'
+import type OpenAI from 'openai'
+
+async function loadOpenAI(): Promise<typeof import('openai')> {
+  try {
+    return await import('openai')
+  } catch {
+    throw new Error('OpenAI package is not installed. Run `npm install openai` or switch to Anthropic in Settings.')
+  }
+}
 
 interface CodexAuth {
   auth_mode?: string
@@ -104,34 +112,36 @@ export function getCodexCliAuthStatus(): {
   return { available: true, authMode: auth.auth_mode, planType }
 }
 
-function createCodexOpenAIClient(baseURL?: string): OpenAI | null {
+async function createCodexOpenAIClient(baseURL?: string): Promise<OpenAI | null> {
   const apiKey = getCodexApiKey()
   if (!apiKey) return null
-  return new OpenAI({ apiKey, ...(baseURL ? { baseURL } : {}) })
+  const { default: OAI } = await loadOpenAI()
+  return new OAI({ apiKey, ...(baseURL ? { baseURL } : {}) })
 }
 
-export function resolveOpenAIClient(options: {
+export async function resolveOpenAIClient(options: {
   overrideKey?: string
   dbKey?: string
   baseURL?: string
-} = {}): OpenAI {
+} = {}): Promise<OpenAI> {
+  const { default: OAI } = await loadOpenAI()
   const baseURL = options.baseURL ?? process.env.OPENAI_BASE_URL
 
   if (options.overrideKey?.trim()) {
-    return new OpenAI({ apiKey: options.overrideKey.trim(), ...(baseURL ? { baseURL } : {}) })
+    return new OAI({ apiKey: options.overrideKey.trim(), ...(baseURL ? { baseURL } : {}) })
   }
 
   if (options.dbKey?.trim()) {
-    return new OpenAI({ apiKey: options.dbKey.trim(), ...(baseURL ? { baseURL } : {}) })
+    return new OAI({ apiKey: options.dbKey.trim(), ...(baseURL ? { baseURL } : {}) })
   }
 
-  const cliClient = createCodexOpenAIClient(baseURL)
+  const cliClient = await createCodexOpenAIClient(baseURL)
   if (cliClient) return cliClient
 
   const envKey = process.env.OPENAI_API_KEY?.trim()
-  if (envKey) return new OpenAI({ apiKey: envKey, ...(baseURL ? { baseURL } : {}) })
+  if (envKey) return new OAI({ apiKey: envKey, ...(baseURL ? { baseURL } : {}) })
 
-  if (baseURL) return new OpenAI({ apiKey: 'proxy', baseURL })
+  if (baseURL) return new OAI({ apiKey: 'proxy', baseURL })
 
   throw new Error('No OpenAI API key found. Add your key in Settings, or set up Codex CLI.')
 }

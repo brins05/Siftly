@@ -44,7 +44,7 @@ npm run build         # Production build
 ```
 app/
   api/
-    categorize/       # 4-stage AI pipeline (start/stop/status via SSE)
+    categorize/       # 5-stage AI pipeline: vision → entities → articles → enrichment → categorize
     import/           # Bookmark JSON import + dedup
     search/ai/        # FTS5 + Claude semantic search
     settings/
@@ -65,8 +65,9 @@ app/
 lib/
   claude-cli-auth.ts  # Claude CLI OAuth session (macOS keychain)
   categorizer.ts      # AI categorization + default categories
+  article-fetcher.ts  # X article content fetcher (syndication API, no auth)
   vision-analyzer.ts  # Image vision + semantic tagging
-  fts.ts              # SQLite FTS5 full-text search
+  fts.ts              # SQLite FTS5 full-text search (includes article_content)
   rawjson-extractor.ts # Entity extraction from tweet JSON
   parser.ts           # Multi-format bookmark JSON parser
   exporter.ts         # CSV / JSON / ZIP export

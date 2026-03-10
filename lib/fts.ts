@@ -15,6 +15,7 @@ export async function ensureFtsTable(): Promise<void> {
     CREATE VIRTUAL TABLE IF NOT EXISTS ${FTS_TABLE} USING fts5(
       bookmark_id UNINDEXED,
       text,
+      article_content,
       semantic_tags,
       entities,
       image_tags,
@@ -28,13 +29,15 @@ export async function ensureFtsTable(): Promise<void> {
  * Call after import or enrichment runs.
  */
 export async function rebuildFts(): Promise<void> {
+  // Drop and recreate to handle schema changes (e.g. new columns)
+  await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS ${FTS_TABLE}`)
   await ensureFtsTable()
-  await prisma.$executeRawUnsafe(`DELETE FROM ${FTS_TABLE}`)
 
   const bookmarks = await prisma.bookmark.findMany({
     select: {
       id: true,
       text: true,
+      articleContent: true,
       semanticTags: true,
       entities: true,
       mediaItems: { select: { imageTags: true } },
@@ -54,8 +57,8 @@ export async function rebuildFts(): Promise<void> {
           .filter(Boolean)
           .join(' ')
         return prisma.$executeRaw`
-          INSERT INTO bookmark_fts(bookmark_id, text, semantic_tags, entities, image_tags)
-          VALUES (${b.id}, ${b.text}, ${b.semanticTags ?? ''}, ${b.entities ?? ''}, ${imageTagsText})
+          INSERT INTO bookmark_fts(bookmark_id, text, article_content, semantic_tags, entities, image_tags)
+          VALUES (${b.id}, ${b.text}, ${b.articleContent ?? ''}, ${b.semanticTags ?? ''}, ${b.entities ?? ''}, ${imageTagsText})
         `
       }),
     )
