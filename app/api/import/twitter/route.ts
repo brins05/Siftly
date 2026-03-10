@@ -242,7 +242,12 @@ function extractMedia(tweet: TweetResult) {
   return results
 }
 
+const ENABLE_LIVE_SYNC = process.env.ENABLE_LIVE_SYNC === 'true'
+
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  if (!ENABLE_LIVE_SYNC) {
+    return NextResponse.json({ error: 'Live sync is disabled. Set ENABLE_LIVE_SYNC=true to enable.' }, { status: 403 })
+  }
   let body: { authToken?: string; ct0?: string; source?: string; userId?: string } = {}
   try {
     body = await request.json()

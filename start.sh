@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+# WARNING: Do not expose this app to the internet. There is no authentication
+# on any API route. Keep it on localhost only.
+
 # ── Siftly Launcher ───────────────────────────────────────────────────────────
 # Run this once to set up and start Siftly.
 # After first run, just run it again to start the app.
@@ -57,20 +60,10 @@ else
 fi
 echo ""
 
-# ── 5. Start Cloudflare tunnel if token is present ───────────────────────────
+# ── 5. Cloudflare tunnel DISABLED for security ───────────────────────────────
+# This app has no authentication. Exposing it via a tunnel makes all bookmarks,
+# API keys, and settings publicly accessible. Do NOT enable this.
 PORT=${PORT:-3000}
-
-# Source tunnel token from .env
-if grep -q "CLOUDFLARE_TUNNEL_TOKEN" .env 2>/dev/null; then
-  CLOUDFLARE_TUNNEL_TOKEN=$(grep "^CLOUDFLARE_TUNNEL_TOKEN=" .env | cut -d= -f2-)
-fi
-
-if [[ -n "${CLOUDFLARE_TUNNEL_TOKEN:-}" ]]; then
-  echo -e "  ${GREEN}✓${NC} Cloudflare tunnel starting in background"
-  cloudflared tunnel --no-autoupdate run --token "$CLOUDFLARE_TUNNEL_TOKEN" &
-  TUNNEL_PID=$!
-  trap "kill $TUNNEL_PID 2>/dev/null" EXIT
-fi
 
 # ── 6. Open browser and start ─────────────────────────────────────────────────
 echo "  Starting on http://localhost:$PORT"

@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/db'
 import { startScheduler, stopScheduler, isSchedulerRunning } from '@/lib/x-sync'
 
+const ENABLE_LIVE_SYNC = process.env.ENABLE_LIVE_SYNC === 'true'
+
 /** GET — return current X credentials status + schedule config */
 export async function GET() {
   try {
@@ -28,6 +30,9 @@ export async function GET() {
 
 /** POST — save X credentials + optional sync interval */
 export async function POST(request: NextRequest) {
+  if (!ENABLE_LIVE_SYNC) {
+    return NextResponse.json({ error: 'Live sync is disabled. Set ENABLE_LIVE_SYNC=true to enable.' }, { status: 403 })
+  }
   let body: { authToken?: string; ct0?: string; syncInterval?: string } = {}
   try {
     body = await request.json()
@@ -95,6 +100,9 @@ export async function POST(request: NextRequest) {
 
 /** DELETE — remove credentials and stop scheduler */
 export async function DELETE() {
+  if (!ENABLE_LIVE_SYNC) {
+    return NextResponse.json({ error: 'Live sync is disabled. Set ENABLE_LIVE_SYNC=true to enable.' }, { status: 403 })
+  }
   try {
     await prisma.setting.deleteMany({
       where: { key: { in: ['x_auth_token', 'x_ct0', 'x_sync_interval', 'x_last_sync'] } },

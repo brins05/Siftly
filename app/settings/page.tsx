@@ -623,7 +623,11 @@ function ApiKeySection({ onToast }: { onToast: (t: Toast) => void }) {
           </div>
         </>
       )}
-      <p className="text-xs text-zinc-600 mt-4">Keys are stored in plaintext in your local SQLite database (<code className="font-mono">prisma/dev.db</code>). Do not expose the database file.</p>
+      <div className="mt-4 p-3 rounded-xl bg-amber-500/5 border border-amber-500/15">
+        <p className="text-xs text-amber-400/80">
+          <strong>Recommended:</strong> Set your API key via the <code className="font-mono bg-zinc-800 px-1 py-0.5 rounded text-zinc-300">ANTHROPIC_API_KEY</code> environment variable in <code className="font-mono bg-zinc-800 px-1 py-0.5 rounded text-zinc-300">.env.local</code> instead of saving it here. Keys saved through this UI are stored in plaintext in the SQLite database.
+        </p>
+      </div>
     </Section>
   )
 }

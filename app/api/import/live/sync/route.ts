@@ -2,8 +2,13 @@ import { NextResponse } from 'next/server'
 import prisma from '@/lib/db'
 import { syncBookmarks, isSyncing } from '@/lib/x-sync'
 
+const ENABLE_LIVE_SYNC = process.env.ENABLE_LIVE_SYNC === 'true'
+
 /** POST — trigger a manual sync using stored credentials */
 export async function POST() {
+  if (!ENABLE_LIVE_SYNC) {
+    return NextResponse.json({ error: 'Live sync is disabled. Set ENABLE_LIVE_SYNC=true to enable.' }, { status: 403 })
+  }
   if (isSyncing()) {
     return NextResponse.json({ error: 'A sync is already in progress' }, { status: 409 })
   }

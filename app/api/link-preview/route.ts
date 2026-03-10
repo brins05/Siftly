@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import dns from 'dns/promises'
 
 const CACHE_HEADERS = {
   'Cache-Control': 'public, max-age=86400', // cache 24h
@@ -25,6 +26,23 @@ function isPrivateUrl(raw: string): boolean {
     return false
   } catch {
     return true // malformed URL
+  }
+}
+
+/** Resolve hostname and check if the IP falls in a blocked private range */
+async function isPrivateIp(hostname: string): Promise<boolean> {
+  try {
+    const { address } = await dns.lookup(hostname)
+    if (/^127\./.test(address)) return true
+    if (/^10\./.test(address)) return true
+    if (/^172\.(1[6-9]|2[0-9]|3[01])\./.test(address)) return true
+    if (/^192\.168\./.test(address)) return true
+    if (/^169\.254\./.test(address)) return true
+    if (address === '::1' || address === '0.0.0.0') return true
+    if (/^f[cd][0-9a-f]{2}:/i.test(address)) return true
+    return false
+  } catch {
+    return true // unresolvable → block
   }
 }
 
@@ -136,6 +154,16 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   }
 
   if (isPrivateUrl(url)) {
+    return NextResponse.json({ error: 'Invalid URL' }, { status: 400 })
+  }
+
+  // DNS resolution check: catch hostnames that resolve to private IPs (DNS rebinding)
+  try {
+    const { hostname } = new URL(url)
+    if (await isPrivateIp(hostname)) {
+      return NextResponse.json({ error: 'Invalid URL' }, { status: 400 })
+    }
+  } catch {
     return NextResponse.json({ error: 'Invalid URL' }, { status: 400 })
   }
 

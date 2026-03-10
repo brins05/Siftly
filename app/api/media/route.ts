@@ -1,5 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 
+function corsOrigin(request: NextRequest): string {
+  const origin = request.headers.get('Origin') ?? ''
+  // Allow localhost on any port for local dev
+  if (/^https?:\/\/localhost(:\d+)?$/.test(origin)) return origin
+  return 'http://localhost:3000'
+}
+
 const ALLOWED_HOSTS = new Set([
   'pbs.twimg.com',
   'video.twimg.com',
@@ -68,7 +75,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       'Content-Type': contentType,
       'Cache-Control': 'public, max-age=86400',
       'Accept-Ranges': 'bytes',
-      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Origin': corsOrigin(request),
+      'Vary': 'Origin',
     }
 
     // Forward range-related headers so browser can seek into videos

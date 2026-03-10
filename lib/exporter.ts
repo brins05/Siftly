@@ -1,6 +1,22 @@
 import JSZip from 'jszip'
 import prisma from '@/lib/db'
 
+const ALLOWED_MEDIA_HOSTS = new Set([
+  'pbs.twimg.com',
+  'video.twimg.com',
+  'ton.twimg.com',
+  'abs.twimg.com',
+])
+
+function isAllowedMediaUrl(urlStr: string): boolean {
+  try {
+    const { protocol, hostname } = new URL(urlStr)
+    return protocol === 'https:' && ALLOWED_MEDIA_HOSTS.has(hostname)
+  } catch {
+    return false
+  }
+}
+
 interface BookmarkRow {
   id: string
   tweetId: string
@@ -53,6 +69,10 @@ function buildCsvRow(fields: string[]): string {
 }
 
 async function downloadFile(url: string): Promise<Buffer | null> {
+  if (!isAllowedMediaUrl(url)) {
+    console.warn(`[exporter] Skipping disallowed media URL: ${url}`)
+    return null
+  }
   try {
     const response = await fetch(url, {
       signal: AbortSignal.timeout(15_000),
